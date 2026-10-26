@@ -9,7 +9,7 @@ import tempfile
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .video import find_ffmpeg, probe
+from .video import NO_WINDOW, find_ffmpeg, probe
 
 
 class ReelCancelled(Exception):
@@ -129,8 +129,8 @@ def build_reel(
                     "-video_track_timescale", "90000", "-shortest",
                     "-progress", "pipe:1", "-nostats", part]
             label = seg.label or os.path.basename(seg.video)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    universal_newlines=True, errors="replace")
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    universal_newlines=True, errors="replace", **NO_WINDOW)
             assert proc.stdout is not None
             for line in proc.stdout:
                 if should_cancel and should_cancel():
@@ -157,8 +157,8 @@ def build_reel(
         os.makedirs(out_dir, exist_ok=True)
         cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listing,
                "-c", "copy", "-movflags", "+faststart", out_path]
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-                           errors="replace")
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, errors="replace", **NO_WINDOW)
         if r.returncode != 0:
             raise RuntimeError(f"ffmpeg failed joining clips: {r.stderr.strip()[-1500:]}")
         if progress:

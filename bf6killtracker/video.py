@@ -15,11 +15,18 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
 
 import numpy as np
+
+
+# On Windows every console program (ffmpeg) opens its own console window unless
+# told not to. From the GUI that means a window popping up - and stealing focus -
+# for every probe, thumbnail and clip. Pass this to every subprocess call.
+NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
 def find_ffmpeg() -> str:
@@ -62,8 +69,10 @@ def probe(path: str, ffmpeg: Optional[str] = None) -> VideoInfo:
         [ffmpeg, "-hide_banner", "-i", path],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         text=True,
         errors="replace",
+        **NO_WINDOW,
     )
     err = proc.stderr
     if "No such file" in err or "Invalid data" in err:
@@ -120,7 +129,8 @@ def read_roi_frames(
     frame_bytes = w * h * 3
     # stderr goes to a temp file so a chatty ffmpeg can never block on a full pipe
     with tempfile.TemporaryFile() as errf:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errf, bufsize=frame_bytes * 4)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf,
+                                bufsize=frame_bytes * 4, **NO_WINDOW)
         killed = False
         try:
             idx = 0
@@ -148,7 +158,10 @@ def grab_frame(path: str, t: float, ffmpeg: Optional[str] = None) -> np.ndarray:
     info = probe(path, ffmpeg)
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i", path,
            "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    out = subprocess.run(cmd, stdout=subprocess.PIPE, check=True).stdout
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {r.stderr.decode(errors='replace').strip()[-1500:]}")
+    out = r.stdout
     return np.frombuffer(out, np.uint8).reshape(info.height, info.width, 3)
 
 
@@ -159,5 +172,7 @@ def cut_clip(path: str, start: float, end: float, out_path: str, ffmpeg: Optiona
            "-t", f"{max(0.1, end - start):.3f}", "-c:v", "libx264", "-preset", "veryfast",
            "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
            "-movflags", "+faststart", out_path]
-    subprocess.run(cmd, check=True)
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **NO_WINDOW)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {r.stderr.decode(errors='replace').strip()[-1500:]}")
 
