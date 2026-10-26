@@ -153,6 +153,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             o = apply_preset(a.preset, ReelOptions(encoder=a.encoder))
             o.music, o.music_volume, o.beat_sync = a.music, a.music_volume, a.beat_sync
             o.overlays, o.titles, o.replay = a.overlays, a.titles, a.replay
+            o.callout = callout_style_from_args(a)
             if a.max_mb:
                 o.target_mb = a.max_mb
 
@@ -175,6 +176,39 @@ def cmd_analyze(a: argparse.Namespace) -> int:
         write_csv(results, a.csv)
         print(f"wrote {a.csv}")
     return 0 if results else 1
+
+
+def _hex(v: str):
+    v = v.strip().lstrip("#")
+    if len(v) != 6:
+        raise SystemExit(f"error: colour must be 6 hex digits, got {v!r}")
+    return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def callout_style_from_args(a: argparse.Namespace):
+    from .overlay import CalloutStyle
+    st = CalloutStyle()
+    if getattr(a, "callout_style", None):
+        with open(a.callout_style, encoding="utf-8") as f:
+            st = CalloutStyle.from_json(f.read())
+    if a.callout_pos:
+        st.position = a.callout_pos
+    if a.callout_xy:
+        st.position, st.x, st.y = "Custom", a.callout_xy[0], a.callout_xy[1]
+    if a.callout_size:
+        st.size = a.callout_size
+    if a.callout_font:
+        st.font = a.callout_font
+    if a.callout_color:
+        st.color = _hex(a.callout_color)
+    if a.callout_accent:
+        if a.callout_accent.lower() == "none":
+            st.accent = False
+        else:
+            st.accent, st.accent_color = True, _hex(a.callout_accent)
+    if a.callout_text:
+        st.text_first, st.text_streak, st.text_multi = a.callout_text
+    return st
 
 
 def cmd_calibrate(a: argparse.Namespace) -> int:
@@ -230,6 +264,17 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--overlays", action="store_true", help="show kill call-outs (DOUBLE KILL, streak count)")
     an.add_argument("--titles", action="store_true", help="show the video name at the start of each clip")
     an.add_argument("--replay", action="store_true", help="add a slow-motion replay of each clip's key kill")
+    from .overlay import POSITIONS
+    an.add_argument("--callout-style", metavar="FILE.json", help="call-out style saved as JSON (see README)")
+    an.add_argument("--callout-pos", choices=list(POSITIONS), help="where call-outs appear")
+    an.add_argument("--callout-xy", nargs=2, type=float, metavar=("X", "Y"),
+                    help="custom call-out centre as fractions of the frame, e.g. 0.5 0.3")
+    an.add_argument("--callout-size", type=int, metavar="PCT", help="call-out size, %% of default")
+    an.add_argument("--callout-font", metavar="FILE", help="font file (.ttf/.otf) for overlays")
+    an.add_argument("--callout-color", metavar="HEX", help="text colour, e.g. ffd700")
+    an.add_argument("--callout-accent", metavar="HEX|none", help="underline bar colour, or 'none'")
+    an.add_argument("--callout-text", nargs=3, metavar=("FIRST", "STREAK", "MULTI"),
+                    help='texts, e.g. "KILL" "{n} IN A ROW" "{name}"')
     an.add_argument("--max-mb", type=float, help="keep the highlight video under this many MB")
     an.add_argument("--encoder", default="auto",
                     choices=["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"],

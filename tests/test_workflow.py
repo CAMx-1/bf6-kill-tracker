@@ -84,6 +84,8 @@ def test_project_roundtrip_and_library(app, env):
     w._set_trim(0.5, 6.0)
     top.child(1).setCheckState(0, Qt.Unchecked)
     w.cb_overlays.setChecked(True)
+    from bf6killtracker.overlay import CalloutStyle
+    w.callout_style = CalloutStyle(position="Bottom right", size=150, color=(255, 215, 0), text_streak="{n} IN A ROW")
     proj = str(env / "p" / "mine.bf6proj")
     os.makedirs(os.path.dirname(proj))
     w.save_project(proj)
@@ -97,6 +99,8 @@ def test_project_roundtrip_and_library(app, env):
     e = w2.videos[0]
     assert e.trims == {"s2.000": (0.5, 6.0)} and e.selected.get("s12.000") is False
     assert w2.cb_overlays.isChecked()
+    assert w2.callout_style.position == "Bottom right" and w2.callout_style.color == (255, 215, 0)
+    assert w2.reel_options().callout.text_streak == "{n} IN A ROW"
 
     data = library.load_project(proj)
     assert data["videos"][0]["rel"] == os.path.join("..", "clip.mp4")

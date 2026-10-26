@@ -148,3 +148,55 @@ def test_encoder_selection_falls_back():
     assert pick_encoder(ff, "h264_does_not_exist") == "libx264"
     assert "-crf" in encoder_args("libx264", 20, "fast", None)
     assert "-b:v" in encoder_args("h264_nvenc", 20, "fast", 2_000_000)
+
+
+# ---------------------------------------------------------------- call-out style
+from bf6killtracker.overlay import CalloutStyle, preview, render_callout  # noqa: E402
+
+
+def test_callout_texts_and_placement():
+    st = CalloutStyle(text_streak="{n} in a row", text_multi="{name}!", uppercase=True)
+    assert st.texts(1, 1) == ("KILL", "")
+    assert st.texts(1, 4) == ("4 IN A ROW", "")
+    assert st.texts(2, 5) == ("DOUBLE KILL!", "5 KILLS")
+    st.show_count = False
+    assert st.texts(2, 5)[1] == ""
+    assert CalloutStyle(position="Bottom right").place(200, 50, 1920, 1080) == (1513, 925)
+    assert CalloutStyle(position="Custom", x=1.2, y=-1).place(200, 50, 1920, 1080) == (1720, 0)  # kept on screen
+    assert CalloutStyle.from_json(st.to_json()) == st
+    assert CalloutStyle.from_json("not json") == CalloutStyle()
+    assert CalloutStyle.from_json('{"size": 150, "unknown": 1}').size == 150
+
+
+def test_callout_size_and_colour():
+    small = render_callout(CalloutStyle(size=50), "KILL", "", 1080)
+    big = render_callout(CalloutStyle(size=200), "KILL", "", 1080)
+    assert big.height > 3 * small.height
+    img = preview(CalloutStyle(position="Top left", color=(255, 0, 0), accent=False, outline=0), size=(640, 360),
+                  kills_here=1, running=1)
+    px = [img.getpixel((x, y)) for x in range(0, 200) for y in range(0, 80)]
+    assert any(r > 200 and g < 60 and b < 60 for r, g, b in px)              # red text top-left
+    assert not any(r > 200 and g < 60 and b < 60 for r, g, b in
+                   (img.getpixel((x, y)) for x in range(400, 640) for y in range(250, 360)))
+
+
+def test_reel_uses_callout_position(videos, tmp_path):
+    import cv2
+    import numpy as np
+    a, _ = videos
+    out = str(tmp_path / "c.mp4")
+    st = CalloutStyle(position="Bottom right", size=150)
+    seg = Segment(a, 0.0, 3.0, kills=[(1.0, 1)])
+    frames = []
+    for overlays in (False, True):
+        out = str(tmp_path / f"c{overlays}.mp4")
+        build_reel([seg], out, options=ReelOptions(size=(640, 360), fps=30, fade=0, overlays=overlays, callout=st))
+        cap = cv2.VideoCapture(out)
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1700)
+        ok, f = cap.read()
+        assert ok
+        frames.append(f.astype(int))
+    diff = np.abs(frames[1] - frames[0]).max(axis=2) > 60       # pixels changed by the call-out
+    ys, xs = np.nonzero(diff)
+    assert len(xs) > 200
+    assert xs.mean() > 400 and ys.mean() > 250                  # bottom right of 640x360

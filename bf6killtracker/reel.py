@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .overlay import CalloutStyle
 from .video import NO_WINDOW, find_ffmpeg, probe
 
 
@@ -62,6 +63,7 @@ class ReelOptions:
     beat_sync: bool = False                     # nudge cuts onto the music's beats
     # overlays
     overlays: bool = False                      # kill call-outs ("TRIPLE KILL", running count)
+    callout: Optional["CalloutStyle"] = None    # look/placement of call-outs (default style if None)
     titles: bool = False                        # clip title (e.g. video name/date) at the start of each clip
     # replay
     replay: bool = False                        # slow-motion replay of each clip's key kill
@@ -262,32 +264,37 @@ def _beat_sync(parts: List[_Part], beats: List[float], infos, max_change: float 
 
 def _overlay_specs(p: _Part, o: ReelOptions, W: int, H: int, tmp: str, n: int):
     """[(png_path, x, y, t_from, t_to)] in output-clip time."""
-    from .overlay import multikill_name, render_text
+    from .overlay import CalloutStyle, render_callout, render_text
+    st = o.callout or CalloutStyle()
+    common = dict(font_path=st.font, outline_pct=st.outline, outline_color=st.outline_color, shadow=st.shadow)
     specs = []
     if p.replay:
         path = os.path.join(tmp, f"ov{n}_replay.png")
-        w, h = render_text(path, "REPLAY", int(H * 0.045), color=(255, 210, 80))
+        w, h = render_text(path, "REPLAY", int(H * 0.045), color=(255, 210, 80), **common)
         specs.append((path, int(W * 0.04), int(H * 0.06), 0.0, p.out_dur))
         return specs
     if o.titles and p.seg.title:
         path = os.path.join(tmp, f"ov{n}_title.png")
-        w, h = render_text(path, p.seg.title, int(H * 0.035))
+        w, h = render_text(path, p.seg.title, int(H * 0.035), color=st.color, **common)
         specs.append((path, (W - w) // 2, int(H * 0.82) - h, 0.2, min(p.out_dur, 3.0)))
     if o.overlays and p.seg.kills:
         running = 0
         ks = sorted(p.seg.kills)
         for i, (t, c) in enumerate(ks):
             running += c
-            rel = t - p.start
+            rel = (t - p.start) / p.speed
             if rel < 0 or rel > p.out_dur:
                 continue
-            nxt = ks[i + 1][0] - p.start if i + 1 < len(ks) else rel + 1.8
-            until = min(p.out_dur, rel + 1.8, max(rel + 0.6, nxt))
-            main = multikill_name(c) if c > 1 else ("KILL" if running == 1 else f"{running} KILL STREAK")
-            sub = f"{running} KILLS" if c > 1 and running > c else ""
+            nxt = (ks[i + 1][0] - p.start) / p.speed if i + 1 < len(ks) else rel + st.duration
+            until = min(p.out_dur, rel + st.duration, max(rel + 0.6, nxt))
+            main, sub = st.texts(c, running)
+            if not main.strip():
+                continue
+            img = render_callout(st, main, sub, H)
             path = os.path.join(tmp, f"ov{n}_{i}.png")
-            w, h = render_text(path, main, int(H * 0.05), accent=(255, 140, 30), sub=sub)
-            specs.append((path, (W - w) // 2, int(H * 0.22), rel + 0.15, until))
+            img.save(path)
+            x, y = st.place(img.width, img.height, W, H)
+            specs.append((path, x, y, rel + 0.15, until))
     return specs
 
 

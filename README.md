@@ -34,6 +34,10 @@ bike-c4.mp4
    - **Export preset:** YouTube 1440p60 / 1080p60, Vertical 9:16 (TikTok, Shorts, Reels; centred on the crosshair and the kill notification), Discord (under 25 MB), or GIF.
    - **Music:** set its volume, optionally lower it while the game is loud, and optionally cut clips on the beat.
    - **Extras:** kill call-outs (DOUBLE KILL, 4 KILL STREAK), a clip title, and a slow-motion replay of the best kill in each clip.
+   - **Call-out style…** opens an editor with a live preview on a frame from the selected clip:
+     - Placement: a preset position (top, upper/lower third, centre, bottom, corners), or a custom spot set with sliders or by clicking the preview.
+     - Size, font (any installed font or a font file), text colour, accent bar, outline thickness and colour, drop shadow, and ALL CAPS.
+     - Wording for the first kill, streaks (`{n}` = kill number) and multi-kills (`{name}` = DOUBLE KILL…), plus how long call-outs stay on screen.
    - **Encoder:** GPU (NVIDIA, Intel, AMD) on Windows when available, otherwise the CPU.
 7. **Save your work.** **Save project…** / **Open project…** keep your videos, ticked clips, trims, order and settings.
 8. **See your stats.** **Library & stats** shows every scanned session: best streaks, K/D, kills per hour and headshot rate.
@@ -72,6 +76,11 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 | `--preset NAME` | Export preset, e.g. `"YouTube 1080p60"` or `"Discord (under 25 MB)"`. |
 | `--music FILE --beat-sync` | Add background music, optionally cutting on the beat. |
 | `--overlays --titles --replay` | Kill call-outs, clip titles, slow-mo replays. |
+| `--callout-pos "Lower third"` / `--callout-xy 0.75 0.6` | Where call-outs appear: a named position, or a centre point as fractions of the frame. |
+| `--callout-size 140 --callout-font FILE` | Call-out size (% of default) and font file. |
+| `--callout-color ffd700 --callout-accent none` | Text colour and accent bar colour (or `none`). |
+| `--callout-text "KILL" "{n} IN A ROW" "{name}!"` | Wording for first kill, streak and multi-kill. |
+| `--callout-style FILE.json` | A full style (same fields as in a project file's `callout_style`). |
 | `--max-mb N`, `--encoder NAME` | File-size limit; encoder choice. |
 | `--clips DIR` | Also export each streak as a separate clip. |
 | `--streak-gap 5 --streak-min 3` | What counts as a streak. |

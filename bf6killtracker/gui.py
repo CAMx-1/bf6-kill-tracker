@@ -17,7 +17,7 @@ from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QDialog, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QLineEdit, QListWidget, QListWidgetItem, QScrollArea, QSpinBox, QSplitter, QStatusBar, QStyle,
+    QLineEdit, QListWidget, QSlider, QListWidgetItem, QScrollArea, QSpinBox, QSplitter, QStatusBar, QStyle,
     QTabWidget, QTableWidget, QTableWidgetItem, QToolBar,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
@@ -26,6 +26,7 @@ from . import __version__
 from .analyzer import AnalysisResult, Cancelled, analyze
 from .cli import VIDEO_EXTS, fmt_time
 from .events import KillEvent, Streak, find_streaks
+from .overlay import CalloutStyle
 from .reel import PRESETS, ReelCancelled, ReelOptions, Segment, apply_preset, build_reel, plan_segments
 from . import library
 from .preview import PreviewPlayer
@@ -215,6 +216,247 @@ class ThumbWorker(Worker):
                 self.thumb.emit(self.req, t, q)
             except Exception:
                 pass
+
+
+class CalloutDialog(QDialog):
+    """Edit where kill call-outs appear and how they look, with a live preview."""
+    EXAMPLES = [("Double kill", 2, 3), ("Streak (4th kill)", 1, 4), ("First kill", 1, 1)]
+
+    def __init__(self, parent, style: "CalloutStyle", frame: Optional[QImage] = None):
+        super().__init__(parent)
+        from .overlay import POSITIONS, system_fonts
+        self.setWindowTitle("Kill call-out style")
+        self.style_ = CalloutStyle.from_json(style.to_json())
+        self.frame = frame
+        self._busy = False
+        lay = QHBoxLayout(self)
+        form = QFormLayout()
+        lay.addLayout(form)
+
+        self.cb_pos = QComboBox()
+        self.cb_pos.addItems(list(POSITIONS))
+        self.sl_x, self.sl_y = QSlider(Qt.Horizontal), QSlider(Qt.Horizontal)
+        for sl in (self.sl_x, self.sl_y):
+            sl.setRange(0, 100)
+        self.sl_size = QSlider(Qt.Horizontal)
+        self.sl_size.setRange(40, 300)
+        self.lbl_size = QLabel()
+        size_row = QHBoxLayout()
+        size_row.addWidget(self.sl_size, 1)
+        size_row.addWidget(self.lbl_size)
+        self.cb_font = QComboBox()
+        self.cb_font.addItem("Default (bold system font)", "")
+        for name, path in system_fonts():
+            self.cb_font.addItem(name, path)
+        b_font = QPushButton("File…")
+        b_font.clicked.connect(self._font_file)
+        font_row = QHBoxLayout()
+        font_row.addWidget(self.cb_font, 1)
+        font_row.addWidget(b_font)
+        self.btn_color = self._color_button("color")
+        self.cb_accent = QCheckBox("Bar under the text")
+        self.btn_accent = self._color_button("accent_color")
+        accent_row = QHBoxLayout()
+        accent_row.addWidget(self.cb_accent)
+        accent_row.addWidget(self.btn_accent)
+        accent_row.addStretch(1)
+        self.sl_outline = QSlider(Qt.Horizontal)
+        self.sl_outline.setRange(0, 300)
+        self.btn_outline = self._color_button("outline_color")
+        outline_row = QHBoxLayout()
+        outline_row.addWidget(self.sl_outline, 1)
+        outline_row.addWidget(self.btn_outline)
+        self.cb_shadow = QCheckBox("Drop shadow")
+        self.cb_upper = QCheckBox("ALL CAPS")
+        self.ed_first, self.ed_streak, self.ed_multi = QLineEdit(), QLineEdit(), QLineEdit()
+        self.ed_streak.setToolTip("{n} = kills so far in the clip")
+        self.ed_multi.setToolTip("{name} = DOUBLE KILL, TRIPLE KILL…   {n} = kills so far")
+        self.cb_count = QCheckBox("Show “N KILLS” under multi-kills")
+        self.sp_dur = QDoubleSpinBox()
+        self.sp_dur.setRange(0.6, 6.0)
+        self.sp_dur.setSingleStep(0.2)
+        self.sp_dur.setSuffix(" s on screen")
+
+        form.addRow("<b>Placement</b>", QLabel(""))
+        form.addRow("Position", self.cb_pos)
+        form.addRow("Left ↔ right", self.sl_x)
+        form.addRow("Top ↕ bottom", self.sl_y)
+        form.addRow("Size", size_row)
+        form.addRow("<b>Text</b>", QLabel("(or click the preview to place it)"))
+        form.addRow("Font", font_row)
+        form.addRow("Colour", self.btn_color)
+        form.addRow("Accent", accent_row)
+        form.addRow("Outline", outline_row)
+        form.addRow("", self.cb_shadow)
+        form.addRow("", self.cb_upper)
+        form.addRow("First kill", self.ed_first)
+        form.addRow("Streak", self.ed_streak)
+        form.addRow("Multi-kill", self.ed_multi)
+        form.addRow("", self.cb_count)
+        form.addRow("Timing", self.sp_dur)
+
+        right = QVBoxLayout()
+        lay.addLayout(right, 1)
+        self.cb_example = QComboBox()
+        self.cb_example.addItems([n for n, *_ in self.EXAMPLES])
+        ex_row = QHBoxLayout()
+        ex_row.addWidget(QLabel("Preview:"))
+        ex_row.addWidget(self.cb_example)
+        ex_row.addStretch(1)
+        right.addLayout(ex_row)
+        self.preview_lbl = QLabel()
+        self.preview_lbl.setFixedSize(640, 360)
+        self.preview_lbl.setCursor(Qt.CrossCursor)
+        self.preview_lbl.mousePressEvent = self._click_preview
+        right.addWidget(self.preview_lbl)
+        right.addStretch(1)
+        btns = QHBoxLayout()
+        b_reset = QPushButton("Reset to default")
+        b_reset.clicked.connect(lambda: self._load(CalloutStyle()))
+        b_ok = QPushButton("OK")
+        b_ok.setDefault(True)
+        b_ok.clicked.connect(self.accept)
+        b_cancel = QPushButton("Cancel")
+        b_cancel.clicked.connect(self.reject)
+        btns.addWidget(b_reset)
+        btns.addStretch(1)
+        btns.addWidget(b_cancel)
+        btns.addWidget(b_ok)
+        right.addLayout(btns)
+
+        self._load(self.style_)
+        for w in (self.cb_pos, self.cb_font, self.cb_example):
+            w.currentIndexChanged.connect(self._changed)
+        for w in (self.sl_size, self.sl_outline):
+            w.valueChanged.connect(self._changed)
+        self.sl_x.valueChanged.connect(lambda *_: self._moved())
+        self.sl_y.valueChanged.connect(lambda *_: self._moved())
+        for w in (self.cb_accent, self.cb_shadow, self.cb_upper, self.cb_count):
+            w.toggled.connect(self._changed)
+        for w in (self.ed_first, self.ed_streak, self.ed_multi):
+            w.textChanged.connect(self._changed)
+        self.sp_dur.valueChanged.connect(self._changed)
+
+    # -- helpers
+    def _color_button(self, attr: str) -> QPushButton:
+        b = QPushButton()
+        b.setFixedWidth(60)
+        b.clicked.connect(lambda: self._pick_color(attr))
+        b._attr = attr
+        return b
+
+    def _paint_buttons(self) -> None:
+        for b in (self.btn_color, self.btn_accent, self.btn_outline):
+            r, g, bl = getattr(self.style_, b._attr)
+            b.setStyleSheet(f"background-color: rgb({r},{g},{bl}); border: 1px solid #888; min-height: 18px;")
+
+    def _pick_color(self, attr: str) -> None:
+        from PySide6.QtWidgets import QColorDialog
+        c = QColorDialog.getColor(QColor(*getattr(self.style_, attr)), self, "Choose colour")
+        if c.isValid():
+            setattr(self.style_, attr, (c.red(), c.green(), c.blue()))
+            self._paint_buttons()
+            self._render()
+
+    def _font_file(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "Choose a font", os.path.expanduser("~"),
+                                           "Fonts (*.ttf *.otf *.ttc);;All files (*)")
+        if f:
+            self.cb_font.addItem(os.path.basename(f), f)
+            self.cb_font.setCurrentIndex(self.cb_font.count() - 1)
+
+    def _load(self, st: "CalloutStyle") -> None:
+        self._busy = True
+        self.style_ = CalloutStyle.from_json(st.to_json())
+        self.cb_pos.setCurrentText(st.position)
+        ax, ay = st.anchor()
+        self.sl_x.setValue(int(round(ax * 100)))
+        self.sl_y.setValue(int(round(ay * 100)))
+        self.sl_size.setValue(st.size)
+        i = self.cb_font.findData(st.font)
+        if i < 0 and st.font:
+            self.cb_font.addItem(os.path.basename(st.font), st.font)
+            i = self.cb_font.count() - 1
+        self.cb_font.setCurrentIndex(max(0, i))
+        self.cb_accent.setChecked(st.accent)
+        self.sl_outline.setValue(st.outline)
+        self.cb_shadow.setChecked(st.shadow)
+        self.cb_upper.setChecked(st.uppercase)
+        self.ed_first.setText(st.text_first)
+        self.ed_streak.setText(st.text_streak)
+        self.ed_multi.setText(st.text_multi)
+        self.cb_count.setChecked(st.show_count)
+        self.sp_dur.setValue(st.duration)
+        self._busy = False
+        self._paint_buttons()
+        self._render()
+
+    def _moved(self) -> None:
+        if self._busy:
+            return
+        self._busy = True
+        self.cb_pos.setCurrentText("Custom")   # dragging a slider means a custom spot
+        self._busy = False
+        self._changed()
+
+    def _click_preview(self, e) -> None:
+        pos = e.position() if hasattr(e, "position") else e.pos()
+        self._busy = True
+        self.cb_pos.setCurrentText("Custom")
+        self.sl_x.setValue(int(round(100 * pos.x() / self.preview_lbl.width())))
+        self.sl_y.setValue(int(round(100 * pos.y() / self.preview_lbl.height())))
+        self._busy = False
+        self._changed()
+
+    def _changed(self, *_):
+        if self._busy:
+            return
+        st = self.style_
+        st.position = self.cb_pos.currentText()
+        if st.position == "Custom":
+            st.x, st.y = self.sl_x.value() / 100, self.sl_y.value() / 100
+        else:
+            ax, ay = st.anchor()
+            st.x, st.y = ax, ay
+            self._busy = True
+            self.sl_x.setValue(int(round(ax * 100)))
+            self.sl_y.setValue(int(round(ay * 100)))
+            self._busy = False
+        st.size = self.sl_size.value()
+        st.font = self.cb_font.currentData() or ""
+        st.accent = self.cb_accent.isChecked()
+        st.outline = self.sl_outline.value()
+        st.shadow = self.cb_shadow.isChecked()
+        st.uppercase = self.cb_upper.isChecked()
+        st.text_first = self.ed_first.text()
+        st.text_streak = self.ed_streak.text()
+        st.text_multi = self.ed_multi.text()
+        st.show_count = self.cb_count.isChecked()
+        st.duration = self.sp_dur.value()
+        self._render()
+
+    def _render(self) -> None:
+        from PIL import Image
+        from .overlay import preview
+        self.lbl_size.setText(f"{self.style_.size}%")
+        bg = None
+        if self.frame is not None and not self.frame.isNull():
+            q = self.frame.convertToFormat(QImage.Format_RGB888)
+            bg = Image.frombytes("RGB", (q.width(), q.height()), bytes(q.constBits())[:q.bytesPerLine() * q.height()],
+                                 "raw", "RGB", q.bytesPerLine())
+        _, kills_here, running = self.EXAMPLES[self.cb_example.currentIndex()]
+        try:
+            img = preview(self.style_, bg, (1280, 720), kills_here, running)
+        except (KeyError, IndexError, ValueError) as exc:   # bad {placeholder} while typing
+            self.preview_lbl.setText(f"Text error: {exc}")
+            return
+        data = img.tobytes()
+        q = QImage(data, img.width, img.height, img.width * 3, QImage.Format_RGB888).copy()
+        self.preview_lbl.setPixmap(QPixmap.fromImage(q).scaled(self.preview_lbl.size(), Qt.KeepAspectRatio,
+                                                               Qt.SmoothTransformation))
+
+    def result_style(self) -> "CalloutStyle":
+        return self.style_
 
 
 class UpdateWorker(Worker):
@@ -553,6 +795,14 @@ class MainWindow(QMainWindow):
         self.cb_beat.setChecked(self.settings.value("beat_sync", "false") == "true")
         self.cb_overlays = QCheckBox("Kill call-outs (DOUBLE KILL, streak count)")
         self.cb_overlays.setChecked(self.settings.value("overlays", "false") == "true")
+        self.callout_style = CalloutStyle.from_json(self.settings.value("callout_style", ""))
+        self.btn_callout = QPushButton("Style…")
+        self.btn_callout.setToolTip("Where the call-outs appear, font, colours and wording")
+        self.btn_callout.clicked.connect(self.edit_callout_style)
+        callout_row = QHBoxLayout()
+        callout_row.addWidget(self.cb_overlays)
+        callout_row.addWidget(self.btn_callout)
+        callout_row.addStretch(1)
         self.cb_titles = QCheckBox("Video name at the start of each clip")
         self.cb_titles.setChecked(self.settings.value("titles", "false") == "true")
         self.cb_replay = QCheckBox("Slow-motion replay of the best kill in each clip")
@@ -579,7 +829,7 @@ class MainWindow(QMainWindow):
         rf.addRow("", self.sp_music_vol)
         rf.addRow("", self.cb_duck)
         rf.addRow("", self.cb_beat)
-        rf.addRow("Extras", self.cb_overlays)
+        rf.addRow("Extras", callout_row)
         rf.addRow("", self.cb_titles)
         rf.addRow("", self.cb_replay)
         rf.addRow("Encoder", self.cb_encoder)
@@ -1106,6 +1356,24 @@ class MainWindow(QMainWindow):
             self._mark_tree_item(v, c)
             self._update_reel_summary()
 
+    def edit_callout_style(self) -> None:
+        frame = None
+        v, c = self._current_clip()
+        if v is not None and c is not None:
+            try:
+                import cv2
+                img = grab_frame(v.path, c.events[-1].time + 0.6 if c.events else c.start)
+                rgb = cv2.cvtColor(cv2.resize(img, (1280, 720), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+                frame = QImage(rgb.data, 1280, 720, 1280 * 3, QImage.Format_RGB888).copy()
+            except Exception:
+                frame = None
+        dlg = CalloutDialog(self, self.callout_style, frame)
+        if dlg.exec():
+            self.callout_style = dlg.result_style()
+            self.settings.setValue("callout_style", self.callout_style.to_json())
+            if not self.cb_overlays.isChecked():
+                self.cb_overlays.setChecked(True)
+
     # -- reel options -------------------------------------------------------
     def _on_preset(self, name: str) -> None:
         custom = name == "Custom"
@@ -1131,6 +1399,8 @@ class MainWindow(QMainWindow):
         o.overlays, o.titles, o.replay = self.cb_overlays.isChecked(), self.cb_titles.isChecked(), \
             self.cb_replay.isChecked()
         o.encoder = self._encoders[self.cb_encoder.currentIndex()][1]
+        o.callout = self.callout_style
+        self.settings.setValue("callout_style", self.callout_style.to_json())
         for key, val in (("music", self.ed_music.text()), ("music_volume", self.sp_music_vol.value()),
                          ("duck", o.duck), ("beat_sync", o.beat_sync), ("overlays", o.overlays),
                          ("titles", o.titles), ("replay", o.replay), ("encoder", self.cb_encoder.currentIndex())):
@@ -1338,7 +1608,7 @@ class MainWindow(QMainWindow):
                 v.path, path, selected=v.selected, trims={k: list(t) for k, t in v.trims.items()}))
         settings = {k: self.settings.value(k) for k in (
             "streak_min", "streak_gap", "streak_types", "show_singles", "pad_before", "pad_after", "reel_preset",
-            "music", "music_volume", "duck", "beat_sync", "overlays", "titles", "replay", "encoder")}
+            "music", "music_volume", "duck", "beat_sync", "overlays", "titles", "replay", "encoder", "callout_style")}
         self.reel_options()   # make sure the latest UI values are in settings
         settings = {k: self.settings.value(k) for k in settings}
         return {"videos": vids, "order": [list(k) for k in self.reel_order], "settings": settings}
@@ -1390,6 +1660,8 @@ class MainWindow(QMainWindow):
         if st.get("reel_preset"):
             self.cb_preset.setCurrentText(str(st["reel_preset"]))
         self.ed_music.setText(str(st.get("music") or ""))
+        if st.get("callout_style"):
+            self.callout_style = CalloutStyle.from_json(st["callout_style"])
         self.videos = []
         missing = [v["path"] for v in data["videos"] if not os.path.isfile(v["path"])]
         self.add_paths([v["path"] for v in data["videos"] if os.path.isfile(v["path"])])
