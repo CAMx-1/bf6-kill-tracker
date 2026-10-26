@@ -39,6 +39,10 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "analyze failed: $($p.ExitCode)" }
           Get-Content smoke.json
           if (Select-String -Path err2.txt -Pattern "WARN|error" -Quiet) { throw "errors while analysing" }
+          $env:BF6KT_GUI_SMOKE = "1"; $env:BF6KT_NO_UPDATE_CHECK = "1"
+          $p = Start-Process $exe -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "GUI failed to start: $($p.ExitCode)" }
+          "GUI opened and closed OK"
       - run: Compress-Archive -Path dist/BF6KillTracker -DestinationPath BF6KillTracker-windows.zip
         shell: pwsh
       - uses: actions/upload-artifact@v4

@@ -1446,6 +1446,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv:
         w.add_paths(argv)
     w.show()
+    if os.environ.get("BF6KT_GUI_SMOKE"):     # CI: open the window, then quit
+        QTimer.singleShot(1500, app.quit)
     return app.exec()
 
 
