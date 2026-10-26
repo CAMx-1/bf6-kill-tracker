@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bf6-kill-tracker"
-version = "0.2.0"
+version = "0.3.0"
 description = "Detect kills and kill streaks in Battlefield 6 gameplay videos from the on-screen kill skull."
 readme = "README.md"
 requires-python = ">=3.9"

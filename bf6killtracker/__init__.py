@@ -7,4 +7,4 @@ __all__ = [
     "AnalysisResult", "analyze", "HudLayout", "SkullDetector", "KillEvent", "KillTracker",
     "Streak", "TrackerConfig", "find_streaks", "max_kills_in_window",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
