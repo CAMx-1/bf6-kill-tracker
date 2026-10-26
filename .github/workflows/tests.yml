@@ -6,7 +6,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest, ubuntu-latest]
-        python: ["3.9", "3.12", "3.14"]
+        python: ["3.9", "3.12", "3.14", "3.15"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +21,7 @@ jobs:
       - run: python -m pytest -q
         env:
           QT_QPA_PLATFORM: offscreen
+          BF6KT_NO_UPDATE_CHECK: "1"
       # smoke test of the CLI + bundled ffmpeg on a generated video
       - run: python -c "import imageio_ffmpeg,subprocess; subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-f','lavfi','-i','testsrc=size=1280x720:rate=30','-t','2','-pix_fmt','yuv420p','smoke.mp4'],check=True)"
       - run: python -m bf6killtracker analyze smoke.mp4 --json smoke.json
