@@ -24,3 +24,16 @@ jobs:
       # smoke test of the CLI + bundled ffmpeg on a generated video
       - run: python -c "import imageio_ffmpeg,subprocess; subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-f','lavfi','-i','testsrc=size=1280x720:rate=30','-t','2','-pix_fmt','yuv420p','smoke.mp4'],check=True)"
       - run: python -m bf6killtracker analyze smoke.mp4 --json smoke.json
+      # the double-click launchers: first run installs into .venv, second run must skip setup
+      - if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call bf6killtracker.bat --version || exit /b 1
+          call bf6killtracker.bat --version > second.txt || exit /b 1
+          type second.txt
+          findstr /c:"Setting up" second.txt && exit /b 1 || exit /b 0
+      - if: runner.os != 'Windows'
+        run: |
+          ./"BF6 Kill Tracker.command" --version
+          ./"BF6 Kill Tracker.command" --version | tee second.txt
+          ! grep -q "Setting up" second.txt

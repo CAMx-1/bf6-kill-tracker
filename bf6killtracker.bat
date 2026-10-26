@@ -5,9 +5,10 @@ rem   bf6killtracker.bat analyze "C:\Videos\clip.mp4" --reel highlights.mp4
 setlocal
 set "HERE=%~dp0"
 set "PY=%HERE%.venv\Scripts\python.exe"
-if exist "%HERE%.venv\installed.ok" goto run
+rem reinstall packages whenever requirements.txt changes (e.g. after an update)
+if exist "%HERE%.venv\installed.ok" fc /b "%HERE%requirements.txt" "%HERE%.venv\installed.ok" >nul 2>&1 && goto run
 
-echo Setting up Python environment (first run only)...
+echo Setting up Python packages (first run or after an update)...
 if exist "%PY%" goto deps
 py -3 -m venv "%HERE%.venv"
 if not exist "%PY%" python -m venv "%HERE%.venv"
@@ -20,7 +21,7 @@ if not exist "%PY%" (
 "%PY%" -m pip install --upgrade pip >nul
 "%PY%" -m pip install -r "%HERE%requirements.txt"
 if errorlevel 1 exit /b 1
-echo ok> "%HERE%.venv\installed.ok"
+copy /y "%HERE%requirements.txt" "%HERE%.venv\installed.ok" >nul
 
 :run
 set "PYTHONPATH=%HERE%;%PYTHONPATH%"
