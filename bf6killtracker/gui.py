@@ -217,6 +217,16 @@ class ThumbWorker(Worker):
                 pass
 
 
+class UpdateWorker(Worker):
+    found = Signal(object)
+
+    def run(self) -> None:
+        from .update import check_for_update
+        rel = check_for_update()
+        if rel:
+            self.found.emit(rel)
+
+
 class LibraryDialog(QDialog):
     """Every scanned session with totals: best streaks, kills per hour, headshot rate, K/D."""
     open_videos = Signal(list)
@@ -311,6 +321,9 @@ class MainWindow(QMainWindow):
         wd = self.settings.value("watch_dir", "")
         if wd and os.path.isdir(wd) and self.settings.value("watching", "false") == "true":
             self.start_watching(wd)
+        if self.settings.value("check_updates", "true") == "true" and not os.environ.get("BF6KT_NO_UPDATE_CHECK"):
+            QTimer.singleShot(2000, lambda: self._run_in_thread(
+                UpdateWorker(), lambda w: w.found.connect(self._on_update)))
         self._refresh_buttons()
 
     # -- layout ------------------------------------------------------------
@@ -1289,6 +1302,27 @@ class MainWindow(QMainWindow):
             self._watch_timer.start()
         if new and self.add_paths(new) and not self._analyze_worker and not self._reel_worker:
             self.start_analysis()
+
+    def _on_update(self, rel) -> None:
+        self.update_available = rel
+        btn = QPushButton(f"Update available: v{rel.version}")
+        btn.setFlat(True)
+        btn.setStyleSheet("color:#e67e22; font-weight:bold;")
+        btn.clicked.connect(lambda: self._show_update(rel))
+        self.statusBar().addPermanentWidget(btn)
+
+    def _show_update(self, rel) -> None:
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        msg = QMessageBox(self)
+        msg.setWindowTitle(APP_NAME)
+        msg.setText(f"Version {rel.version} is available (you have {__version__}).")
+        msg.setInformativeText((rel.notes or "")[:800])
+        open_btn = msg.addButton("Open download page", QMessageBox.AcceptRole)
+        msg.addButton("Later", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() is open_btn:
+            QDesktopServices.openUrl(QUrl(rel.url))
 
     # -- library -------------------------------------------------------------
     def show_library(self) -> None:

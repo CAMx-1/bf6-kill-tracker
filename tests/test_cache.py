@@ -27,3 +27,13 @@ def test_bad_hwaccel_falls_back_to_software(tmp_path, monkeypatch):
     subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=640x360:rate=30:duration=2",
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", v], check=True, **NO_WINDOW)
     assert analyze(v).duration > 1.5
+
+
+def test_update_version_compare(monkeypatch):
+    from bf6killtracker import update
+    assert update.is_newer("0.2.0", "0.1.9") and update.is_newer("v1.0", "0.9.9")
+    assert not update.is_newer("0.1.0", "0.1.0") and not update.is_newer("", "0.1.0")
+    monkeypatch.setattr(update, "latest_release", lambda timeout=5.0: update.Release("99.0.0", "https://x"))
+    assert update.check_for_update().version == "99.0.0"
+    monkeypatch.setattr(update, "latest_release", lambda timeout=5.0: None)   # offline / no token
+    assert update.check_for_update() is None
