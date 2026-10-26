@@ -166,6 +166,15 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             print(f"\nwrote {a.reel} ({len(segs)} clips)")
         else:
             print("\nno streaks found: highlight video not written")
+    if a.markers:
+        from .markers import FORMATS, export
+        if a.markers_dir:
+            os.makedirs(a.markers_dir, exist_ok=True)
+        for r in results:
+            stem = os.path.splitext(os.path.basename(r.video))[0]
+            for fmt in a.markers:
+                path = os.path.join(a.markers_dir, stem + FORMATS[fmt]) if a.markers_dir else None
+                print(f"wrote {export(r, fmt, path)}")
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump([r.to_dict() for r in results], f, indent=2)
@@ -279,6 +288,9 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--encoder", default="auto",
                     choices=["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"],
                     help="video encoder (auto: GPU on Windows when available)")
+    an.add_argument("--markers", nargs="+", choices=["edl", "fcpxml", "premiere", "chapters", "csv"],
+                    help="write kill/streak markers for video editors (next to each video, or --markers-dir)")
+    an.add_argument("--markers-dir", metavar="DIR", help="folder for marker files")
     an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
     an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
     an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")

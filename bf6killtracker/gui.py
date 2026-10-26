@@ -596,6 +596,9 @@ class MainWindow(QMainWindow):
         self.act_watch.setCheckable(True)
         self.act_watch.setToolTip("Automatically add and scan new recordings that appear in a folder")
         self.act_watch.triggered.connect(self.toggle_watch)
+        self.act_markers = QAction(st.standardIcon(QStyle.SP_FileDialogListView), "Export markers…", self)
+        self.act_markers.setToolTip("Write kill/streak markers for Premiere, Resolve, Final Cut, or YouTube chapters")
+        self.act_markers.triggered.connect(self.export_markers_dialog)
         self.act_library = QAction(st.standardIcon(QStyle.SP_FileDialogDetailedView), "Library && stats", self)
         self.act_library.triggered.connect(self.show_library)
         for a in (self.act_add, self.act_add_dir, self.act_remove):
@@ -604,7 +607,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_analyze)
         tb.addAction(self.act_stop)
         tb.addSeparator()
-        for a in (self.act_open, self.act_save, self.act_watch, self.act_library):
+        for a in (self.act_open, self.act_save, self.act_markers, self.act_watch, self.act_library):
             tb.addAction(a)
 
         # left: video list + settings
@@ -1593,6 +1596,35 @@ class MainWindow(QMainWindow):
         msg.exec()
         if msg.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl(rel.url))
+
+    def export_markers_dialog(self) -> None:
+        from .markers import FORMATS, export
+        done = [v for v in self.videos if v.result]
+        if not done:
+            QMessageBox.information(self, APP_NAME, "Scan a video first.")
+            return
+        labels = {"DaVinci Resolve / Premiere (EDL)": "edl", "Final Cut Pro / Resolve (FCPXML)": "fcpxml",
+                  "Premiere Pro (XML)": "premiere", "YouTube chapters (text)": "chapters", "Spreadsheet (CSV)": "csv"}
+        from PySide6.QtWidgets import QInputDialog
+        choice, ok = QInputDialog.getItem(self, "Export markers", "Format:", list(labels), 0, False)
+        if not ok:
+            return
+        fmt = labels[choice]
+        d = QFileDialog.getExistingDirectory(self, "Save marker files to", os.path.dirname(done[0].path))
+        if not d:
+            return
+        written = []
+        for v in done:
+            r = v.result
+            r.streaks = v.streaks           # current streak rules
+            info = probe(v.path)
+            path = os.path.join(d, os.path.splitext(v.name)[0] + FORMATS[fmt])
+            written.append(export(r, fmt, path, width=info.width, height=info.height))
+        self.status.setText(f"Wrote {len(written)} marker file(s) to {d}")
+        if fmt == "chapters" and len(written) == 1:
+            with open(written[0], encoding="utf-8") as f:
+                QApplication.clipboard().setText(f.read())
+            self.status.setText(self.status.text() + " (chapters copied to the clipboard)")
 
     # -- library -------------------------------------------------------------
     def show_library(self) -> None:
