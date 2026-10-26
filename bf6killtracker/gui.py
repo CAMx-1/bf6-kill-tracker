@@ -31,6 +31,7 @@ from .overlay import CalloutStyle
 from .reel import PRESETS, ReelCancelled, ReelOptions, Segment, apply_preset, build_reel, plan_segments
 from . import library
 from .preview import PreviewPlayer
+from .timeline import Timeline, TimelineClip, waveform
 from .video import cut_clip, find_ffmpeg, grab_frame, probe
 
 APP_NAME = "BF6 Kill Tracker"
@@ -1301,6 +1302,19 @@ class MainWindow(QMainWindow):
         ptl = QVBoxLayout(prev_tab)
         ptl.addWidget(self.thumb_title)
         ptl.addLayout(prev_row)
+        self.timeline = Timeline()
+        self.timeline.setToolTip("Drag a clip's edges to trim it · click to select/seek · wheel to zoom, "
+                                 "shift+wheel or drag to scroll")
+        self.timeline.clipSelected.connect(self._on_timeline_select)
+        self.timeline.clipTrimmed.connect(self._on_timeline_trim)
+        self.timeline.seekRequested.connect(self._on_timeline_seek)
+        self._timeline_video: Optional[str] = None
+        self._waves: Dict[str, np.ndarray] = {}
+        ptl.addWidget(self.timeline)
+        self._tl_timer = QTimer(self)
+        self._tl_timer.setInterval(100)
+        self._tl_timer.timeout.connect(self._tick_playhead)
+        self._tl_timer.start()
         self.tabs = QTabWidget()
         self.tabs.addTab(prev_tab, "Preview && trim")
         self.tabs.addTab(order_tab, "Clip order")
@@ -1561,6 +1575,8 @@ class MainWindow(QMainWindow):
         seg = self._segments(only=(v, c))[0]
         self.preview.load(v.path, seg.start, seg.end, autoplay=True)
         self._show_trim(v, c)
+        self._refresh_timeline(v, c.key)
+        self.timeline.focus_on(seg.start, seg.end)
         self._thumb_req += 1
         self._thumb_slots: Dict[float, QLabel] = {}
         for k in c.events:
@@ -1793,6 +1809,55 @@ class MainWindow(QMainWindow):
         self._refresh_order_list()
         self._update_reel_summary()
 
+    # -- timeline -------------------------------------------------------------
+    def _refresh_timeline(self, v: Optional[VideoEntry], current: Optional[str] = None) -> None:
+        if v is None or v.result is None:
+            self.timeline.set_clips([])
+            return
+        if self._timeline_video != v.path:
+            if v.path not in self._waves:
+                try:
+                    self._waves[v.path] = waveform(v.path)
+                except Exception:
+                    self._waves[v.path] = np.zeros(0, np.float32)
+            self.timeline.set_video(v.duration or v.result.duration, self._waves[v.path],
+                                    [(k.time, k.count) for k in v.result.kills], v.result.deaths)
+            self._timeline_video = v.path
+        clips = []
+        for c in v.clips(self._show_singles()):
+            a, b = self._effective_range(v, c)
+            clips.append(TimelineClip(c.key, a, b, [k.time for k in c.events], c.title, v.is_selected(c),
+                                      c.start, min(v.duration or 1e9, c.end + 0.2)))
+        self.timeline.set_clips(clips, current)
+
+    def _on_timeline_select(self, key: str) -> None:
+        v = next((x for x in self.videos if x.path == self._timeline_video), None)
+        if v is None:
+            return
+        vi = self.videos.index(v)
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            for j in range(top.childCount()):
+                if top.child(j).data(0, Qt.UserRole) == (vi, key):
+                    self.tree.setCurrentItem(top.child(j))
+                    return
+
+    def _on_timeline_trim(self, key: str, a: float, b: float) -> None:
+        self._on_timeline_select(key)
+        self._set_trim(a, b)
+
+    def _on_timeline_seek(self, t: float) -> None:
+        v, c = self._current_clip()
+        if v is None or v.path != self._timeline_video:
+            return
+        a, b = self._effective_range(v, c)
+        if a <= t <= b:
+            self.preview.seek(t - a, play=True)
+
+    def _tick_playhead(self) -> None:
+        if self.preview.path and self.preview.path == self._timeline_video:
+            self.timeline.set_playhead(self.preview.start + self.preview.pos)
+
     # -- trimming ------------------------------------------------------------
     def _effective_range(self, v: VideoEntry, c: Clip):
         seg = self._segments(only=(v, c))
@@ -1818,6 +1883,7 @@ class MainWindow(QMainWindow):
             b = min(b, v.duration)
         v.trims[c.key] = (round(a, 2), round(b, 2))
         self._show_trim(v, c)
+        self._refresh_timeline(v, c.key)
         self.preview.load(v.path, a, b, autoplay=False)
         self._mark_tree_item(v, c)
         self._update_reel_summary()
@@ -1844,6 +1910,7 @@ class MainWindow(QMainWindow):
         v, c = self._current_clip()
         if c and v.trims.pop(c.key, None) is not None:
             self._show_trim(v, c)
+            self._refresh_timeline(v, c.key)
             a, b = self._effective_range(v, c)
             self.preview.load(v.path, a, b, autoplay=False)
             self._mark_tree_item(v, c)
