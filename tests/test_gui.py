@@ -145,3 +145,21 @@ def test_trim_reorder_types_and_options(app, video, tmp_path):
     assert o.vertical and o.size == (1080, 1920) and o.overlays and o.replay and not w.cb_res.isEnabled()
     w.preview.shutdown()
     w.close()
+
+
+def test_make_montage(app, video, tmp_path):
+    from PySide6.QtCore import QSettings
+    w = MainWindow(QSettings(str(tmp_path / "m.ini"), QSettings.IniFormat))
+    w.add_paths([video])
+    kills = [KillEvent(1), KillEvent(5, count=3), KillEvent(10), KillEvent(11), KillEvent(12), KillEvent(17)]
+    w.videos[0].result = AnalysisResult(video, 20.0, 30.0, kills, [], 0, 0.0, 10.0)
+    w.videos[0].status = "Done"
+    w.sp_gap.setValue(2.0)
+    w._regroup_all()
+    w.make_montage(12)
+    sel = [k for (p, k) in w.reel_order]
+    assert sel[-1] == "s5.000"                  # triple kill = highest hype, last
+    assert sel[0] == "s10.000"                  # 3 quick kills = second best, opens the montage
+    assert sum(g.duration for g in w._segments()) <= 13.5
+    w.preview.shutdown()
+    w.close()

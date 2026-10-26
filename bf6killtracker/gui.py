@@ -667,10 +667,10 @@ class MainWindow(QMainWindow):
 
         # right: streak tree + thumbnails + reel
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Clip", "Kills", "Types", "Time", "Length"])
+        self.tree.setHeaderLabels(["Clip", "Kills", "Types", "Time", "Length", "Hype"])
         self.tree.setRootIsDecorated(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        for c in (1, 2, 3, 4):
+        for c in (1, 2, 3, 4, 5):
             self.tree.header().setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._on_tree_check)
         self.tree.currentItemChanged.connect(self._on_clip_selected)
@@ -686,6 +686,10 @@ class MainWindow(QMainWindow):
         self.btn_preview.clicked.connect(self.preview_streak)
         sel_row.addWidget(b_all)
         sel_row.addWidget(b_none)
+        self.btn_montage = QPushButton("Make montage…")
+        self.btn_montage.setToolTip("Tick only the best clips to fill a length, ordered to build up to the best one")
+        self.btn_montage.clicked.connect(self.make_montage_dialog)
+        sel_row.addWidget(self.btn_montage)
         sel_row.addStretch(1)
         sel_row.addWidget(self.btn_preview)
 
@@ -1034,6 +1038,9 @@ class MainWindow(QMainWindow):
                 child = QTreeWidgetItem([c.title + trimmed, str(c.kills), c.types_text(),
                                          fmt_time(c.start) if c.kind == "kill" else
                                          f"{fmt_time(c.start)} – {fmt_time(c.end)}", c.span])
+                hs, why = self._hype(v, c)
+                child.setText(5, f"{hs:.0f}  {'★' * (1 + min(4, int(hs // 25)))}")
+                child.setToolTip(5, ", ".join(why))
                 child.setData(0, Qt.UserRole, (vi, c.key))
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
                 child.setCheckState(0, Qt.Checked if v.is_selected(c) else Qt.Unchecked)
@@ -1247,6 +1254,44 @@ class MainWindow(QMainWindow):
         pairs = [only] if only is not None else self._ordered_selection()
         return plan_segments([self._item(v, c) for v, c in pairs], {v.path: v.duration for v in self.videos},
                              self.sp_pre.value(), self.sp_post.value(), keep_order=True)
+
+    # -- hype & montage -------------------------------------------------------
+    def _hype(self, v: VideoEntry, c: Clip):
+        from .hype import score_clip
+        return score_clip(c.events, v.result.events if v.result else [], c.start, c.end)
+
+    def make_montage_dialog(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        secs, ok = QInputDialog.getInt(self, "Make montage", "Target length (seconds):",
+                                       int(self.settings.value("montage_len", 60)), 10, 1800, 5)
+        if ok:
+            self.settings.setValue("montage_len", secs)
+            self.make_montage(secs)
+
+    def make_montage(self, seconds: float) -> None:
+        """Tick the highest-hype clips that fit ``seconds`` and order them for build-up."""
+        from .hype import Scored, pick_montage
+        if not self.cb_singles.isChecked():
+            self.cb_singles.setChecked(True)          # single kills can be montage material too
+        cands, lookup = [], {}
+        for v in self.videos:
+            for c in v.clips(True):
+                sc, why = self._hype(v, c)
+                a, b = v.trims.get(c.key, (c.start, c.end))
+                s = Scored(v.path, c.key, c.start, c.end, c.kills, sc, why)
+                cands.append(s)
+                lookup[(v.path, c.key)] = v
+        picks = pick_montage(cands, seconds, self.sp_pre.value(), self.sp_post.value())
+        chosen = {(p.video, p.key) for p in picks}
+        for v in self.videos:
+            for c in v.clips(True):
+                v.selected[c.key] = (v.path, c.key) in chosen
+        self.reel_order = [(p.video, p.key) for p in picks]
+        self._rebuild_tree()
+        self.tabs.setCurrentIndex(1)
+        total = sum(g.duration for g in self._segments())
+        self.status.setText(f"Montage: {len(picks)} clips, {fmt_time(total)} — best last. "
+                            f"Add music with “Cut on the beat” for a synced edit.")
 
     # -- clip order ----------------------------------------------------------
     def _sync_order(self, sel=None) -> None:

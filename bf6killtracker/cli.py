@@ -146,13 +146,23 @@ def cmd_analyze(a: argparse.Namespace) -> int:
     if a.reel:
         from .reel import PRESETS, ReelOptions, apply_preset, build_reel, plan_segments
         items = []
-        for r in results:
-            for s in r.streaks:
-                ks = [(k.time, k.count) for k in r.kills if k.streak_id == s.id]
-                items.append((r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}", ks,
-                              os.path.splitext(os.path.basename(r.video))[0]))
+        if a.montage:
+            from .hype import pick_montage, score_result
+            cands = [c for r in results for c in score_result(r)]
+            picks = pick_montage(cands, a.montage, a.pad_before, a.pad_after)
+            print(f"\nmontage: {len(picks)} of {len(cands)} clips, best last:")
+            for c in picks:
+                print(f"  {c.score:5.1f} {c.stars}  {os.path.basename(c.video)} {fmt_time(c.start)}  "
+                      f"({', '.join(c.reasons)})")
+                items.append((c.video, c.start, c.end, f"{c.title} {fmt_time(c.start)}", c.kill_times, c.title))
+        else:
+            for r in results:
+                for s in r.streaks:
+                    ks = [(k.time, k.count) for k in r.kills if k.streak_id == s.id]
+                    items.append((r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}", ks,
+                                  os.path.splitext(os.path.basename(r.video))[0]))
         segs = plan_segments(items, {r.video: r.duration for r in results}, a.pad_before, a.pad_after,
-                             order=[r.video for r in results])
+                             order=[r.video for r in results], keep_order=bool(a.montage))
         if segs:
             o = apply_preset(a.preset, ReelOptions(encoder=a.encoder))
             o.music, o.music_volume, o.beat_sync = a.music, a.music_volume, a.beat_sync
@@ -295,6 +305,9 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--markers", nargs="+", choices=["edl", "fcpxml", "premiere", "chapters", "csv"],
                     help="write kill/streak markers for video editors (next to each video, or --markers-dir)")
     an.add_argument("--markers-dir", metavar="DIR", help="folder for marker files")
+    an.add_argument("--montage", type=float, metavar="SECONDS",
+                    help="with --reel: auto-pick the highest-hype clips (streaks and single kills) to fill about "
+                         "this many seconds, ordered to build up to the best one")
     an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
     an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
     an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")

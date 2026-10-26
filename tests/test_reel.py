@@ -200,3 +200,34 @@ def test_reel_uses_callout_position(videos, tmp_path):
     ys, xs = np.nonzero(diff)
     assert len(xs) > 200
     assert xs.mean() > 400 and ys.mean() > 250                  # bottom right of 640x360
+
+
+# ---------------------------------------------------------------- hype
+from bf6killtracker.events import KillEvent  # noqa: E402
+from bf6killtracker.hype import Scored, build_up_order, pick_montage, score_clip  # noqa: E402
+from bf6killtracker.labels import HudEvent  # noqa: E402
+
+
+def test_hype_scoring():
+    plain, _ = score_clip([KillEvent(10)])
+    multi, why = score_clip([KillEvent(10, count=3)])
+    assert multi > 3 * plain and "triple kill" in why
+    hs, why = score_clip([KillEvent(10, types=["headshot"])])
+    assert hs > plain and "1 headshot" in why
+    fast, _ = score_clip([KillEvent(10), KillEvent(11), KillEvent(12)])
+    slow, _ = score_clip([KillEvent(10), KillEvent(14), KillEvent(18)])
+    assert fast > slow
+    clutch, why = score_clip([KillEvent(10)], [HudEvent(9.0, "last_squad_member_alive", "banner")])
+    assert clutch > plain and "last squad member alive" in why
+    far, _ = score_clip([KillEvent(10)], [HudEvent(30.0, "last_squad_member_alive", "banner")])
+    assert far == plain
+
+
+def test_montage_pick_and_order():
+    cs = [Scored("v", f"c{i}", i * 20, i * 20 + d, 1, sc) for i, (d, sc) in
+          enumerate([(2, 10), (4, 90), (1, 30), (3, 50), (5, 20), (2, 70)])]
+    m = pick_montage(cs, 40, 3, 2)
+    assert sum(c.end - c.start + 5 for c in m) <= 44
+    assert m[-1].score == 90 and m[0].score == 70          # best last, second-best opens
+    assert [c.score for c in m[1:-1]] == sorted(c.score for c in m[1:-1])
+    assert [c.score for c in build_up_order(cs[:2])] == [10, 90]
