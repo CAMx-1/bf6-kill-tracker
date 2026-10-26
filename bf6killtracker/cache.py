@@ -23,7 +23,7 @@ from .events import KillEvent, Life
 from .killfeed import FeedEvent
 
 # bump whenever detection logic changes in a way that changes results
-DETECTOR_VERSION = 3
+DETECTOR_VERSION = 4
 
 
 def cache_dir() -> str:
@@ -68,6 +68,7 @@ def save(result, options: dict) -> None:
         "feed": [{"time": e.time, "kind": e.kind, "headshot": e.headshot, "weapon": e.weapon}
                  for e in result.feed],
         "feed_used": result.feed_used,
+        "events": [e.to_dict() for e in getattr(result, "events", [])],
         "hud": result.hud,
         "processing_s": result.processing_s,
     }
@@ -97,6 +98,9 @@ def load(video: str, options: dict) -> Optional[dict]:
         return None
     data["kills"] = [KillEvent(k["time"], k["count"], k.get("evidence", ""), -1, k.get("types", []),
                                k.get("weapons", [])) for k in data["kills"]]
+    from .labels import HudEvent
+    data["events"] = [HudEvent(e["time"], e["kind"], e.get("group", "action"), e.get("count", 1))
+                      for e in data.get("events", [])]
     data["feed"] = [FeedEvent(e["time"], e["kind"], e.get("headshot", False), e.get("weapon", ""))
                     for e in data.get("feed", [])]
     return data

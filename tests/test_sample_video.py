@@ -48,10 +48,11 @@ def test_sample_video(fps):
 DL = os.path.expanduser("~/Downloads")
 EXTRA = {
     # indoor, includes a squad revive (green icon, not a kill) and a 4-kill burst ("KILL x4")
-    "Battlefield™ 6 - 2026-06-14 11-33-50 PM.mp4": dict(total=7, streak_kills=[5]),
+    "Battlefield™ 6 - 2026-06-14 11-33-50 PM.mp4": dict(total=7, streak_kills=[5], deaths=0,
+                                                         events={"squad_revive", "last_squad_member_alive"}),
     # dirt bike + C4: tank kill whose vehicle-destroyed gear sits in the skull slot,
     # white skulls over yellow flowers, then a C4 double kill
-    "bike-c4.mp4": dict(total=4, streak_kills=[4]),
+    "bike-c4.mp4": dict(total=4, streak_kills=[4], deaths=1, events={"tank_buster", "vehicle_destroyed"}),
 }
 
 
@@ -64,3 +65,5 @@ def test_extra_clips(name):
     r = analyze(path)
     assert r.total_kills == exp["total"]
     assert [s.kills for s in r.streaks] == exp["streak_kills"]
+    assert len(r.deaths) == exp["deaths"]
+    assert exp["events"] <= set(r.event_counts())

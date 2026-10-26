@@ -169,7 +169,10 @@ class FeedReader:
                 and first_red[1] - first_red[0] <= 45
             zone = right[:, name_end + 6:max(name_end + 7, first_red[0] - 4)]
             if g_r[:, name_end + 6:max(name_end + 7, first_red[0] - 4)].sum() < 25:
-                continue   # no green weapon icon: squad wipe ("XX") or other notice, not a kill
+                # no green weapon icon: red "XX" + squad name = you wiped a squad (not an extra kill)
+                if first_red[1] - first_red[0] <= 45 and len(red_runs) >= 2:
+                    rows.append(FeedRow(x + rx, y + ry, "wipe"))
+                continue
             victim = r_r[:, red_runs[1][0] if hs else first_red[0]:]
             rows.append(FeedRow(x + rx, y + ry, "kill", hs, self._weapon(zone), self._name_sig(victim)))
         rows.sort(key=lambda r: r.y)

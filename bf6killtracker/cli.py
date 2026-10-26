@@ -58,6 +58,10 @@ def print_report(r: AnalysisResult) -> None:
         tc = r.type_counts()
         print("  kill types: " + ", ".join(f"{n} {t}" for t, n in sorted(tc.items(), key=lambda x: -x[1])))
         print(f"  most kills in one life: {r.best_life}")
+    if r.events:
+        ec = r.event_counts()
+        acts = [k for k in ec if k not in ("kill", "headshot") and not k.endswith("_kill")]
+        print("  events: " + ", ".join(f"{ec[k]} {k.replace('_', ' ')}" for k in sorted(acts, key=lambda k: -ec[k])))
     events = sorted([(k.time, "kill", k) for k in r.kills] + [(d, "death", None) for d in r.deaths],
                     key=lambda e: e[0])
     if events:

@@ -39,6 +39,11 @@ class AnalysisResult:
     feed_used: bool = False
     hud: str = ""            # how the HUD layout was chosen (auto-calibration summary)
     from_cache: bool = False  # loaded from a remembered scan instead of scanning
+    events: List["HudEvent"] = field(default_factory=list)   # medals, spots, revives, squad wipes...
+
+    def event_counts(self) -> dict:
+        from .labels import summarize
+        return summarize(self.events)
 
     @property
     def total_kills(self) -> int:
@@ -76,6 +81,8 @@ class AnalysisResult:
             "kill_types": self.type_counts(),
             "lives": [lf.to_dict() for lf in self.lives],
             "most_kills_in_one_life": self.best_life,
+            "events": [e.to_dict() for e in self.events],
+            "event_counts": self.event_counts(),
             "hud": self.hud,
             "processing_s": round(self.processing_s, 1),
         }
@@ -94,14 +101,14 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
             config: Optional[TrackerConfig] = None, streak_gap: float = 5.0, streak_min: int = 3,
             window: float = 10.0, progress: Optional[Callable[[float], None]] = None,
             use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True,
-            use_cache: bool = False) -> AnalysisResult:
+            use_cache: bool = False, use_labels: bool = True, label_fps: float = 5.0) -> AnalysisResult:
     """Scan ``path`` for kills, deaths and streaks.
 
     With ``use_cache`` a previous scan of the unchanged file (same detection
     options) is reused, and only the streak grouping is recomputed.
     """
     started = time.time()
-    cache_opts = {"sample_fps": sample_fps, "feed": use_feed, "auto_calibrate": auto_calibrate,
+    cache_opts = {"sample_fps": sample_fps, "feed": use_feed, "labels": use_labels, "auto_calibrate": auto_calibrate,
                   "layout": None if layout is None else repr(layout), "config": repr(config or TrackerConfig())}
     if use_cache:
         from . import cache
@@ -114,6 +121,7 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
                                hit.get("processing_s", 0.0), None, deaths, hit["feed"],
                                split_lives(kills, deaths, hit["duration"]), hit["feed_used"], hit.get("hud", ""))
             r.from_cache = True
+            r.events = hit.get("events", [])
             return r
     info = probe(path)
     fps = sample_fps or info.fps
@@ -135,11 +143,27 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
     every = max(1, int(round(fps / feed_fps)))
     ft = FeedTracker(every / fps)
     rois = [det.roi] + ([reader.roi] if reader else [])
+    lreader = ltracker = None
+    lnames: List[str] = []
+    if use_labels:
+        from .labels import LabelReader, LabelTracker, group_of
+        sc = calibration.scale if calibration is not None and calibration.applied else 1.0
+        base = HudLayout.for_video(info.width, info.height)
+        lreader = LabelReader(det.layout.slot0_x - base.scaled(sc).slot0_x if sc != 1.0 else det.layout.slot0_x - base.slot0_x,
+                              det.layout.icon_y - (base.scaled(sc).icon_y if sc != 1.0 else base.icon_y),
+                              sc, det.layout.ref_size[0])
+        ltracker = LabelTracker()
+        lgroups = group_of(lreader)
+        lnames = list(lreader.rois)
+        rois += [lreader.rois[n] for n in lnames]
+    lev = max(1, int(round(fps / label_fps)))
+    li = 1 + (1 if reader else 0)
 
     def work(i: int, crops):
         obs = det.observe(crops[0])
         rows = reader.read(crops[1]) if reader is not None and i % every == 0 else None
-        return obs, rows
+        labs = lreader.read(dict(zip(lnames, crops[li:]))) if lreader is not None and i % lev == 0 else None
+        return obs, rows, labs
 
     # OpenCV releases the GIL, so frames are processed in parallel while ffmpeg decodes;
     # results are consumed strictly in order
@@ -149,10 +173,12 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
         def drain(limit: int) -> None:
             while len(pending) > limit:
                 t, fut = pending.popleft()
-                obs, rows = fut.result()
+                obs, rows, labs = fut.result()
                 tracker.update(t, obs)
                 if rows is not None:
                     ft.update(t, rows)
+                if labs is not None:
+                    ltracker.update(t, labs, lgroups)
 
         for i, (t, crops) in enumerate(read_multi_roi_frames(path, rois, det.layout.ref_size, sample_fps)):
             if progress:
@@ -168,10 +194,15 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
         kills = fuse_feed(kills, [e for e in feed_events if e.kind == "kill"])
     streaks = find_streaks(kills, streak_gap, streak_min, deaths)
     best, best_t = max_kills_in_window(kills, window)
+    from .labels import HudEvent
+    hud_events = ltracker.finish() if ltracker is not None else []
+    hud_events += [HudEvent(e.time, "squad_wipe", "feed") for e in feed_events if e.kind == "wipe"]
+    hud_events.sort(key=lambda e: e.time)
     result = AnalysisResult(path, info.duration, fps, kills, streaks, best, best_t, window,
                             time.time() - started, tracker.counts, deaths, feed_events,
                             split_lives(kills, deaths, info.duration), use_feed,
                             calibration.describe() if calibration else "manual HUD layout")
+    result.events = hud_events
     if use_cache:
         from . import cache
         cache.save(result, cache_opts)
