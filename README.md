@@ -1,47 +1,65 @@
 # BF6 Kill Tracker
 
-Finds every kill in a Battlefield 6 gameplay recording by watching for the kill skull that pops up under the crosshair, and flags kill streaks (lots of kills in a short time). It works on video files and runs on Windows, macOS and Linux.
+Finds every kill and death in Battlefield 6 gameplay recordings, flags kill streaks, and turns them into a finished highlight video. It reads two things on screen: the kill skulls that pop up under the crosshair, and the kill feed in the top right. Runs on Windows, macOS and Linux.
 
 ```
-quick-19-killstreak.mp4
-  duration 1:31.90  |  18 kills  |  4 streak(s)  |  processed in 35.7s
-  kills:
-    0:08.05
-    0:13.63  [streak 1]
-    ...
-    0:52.02 x3  [streak 3]
-  STREAK 3: 3 kills in 0.0s  (0:52.02 - 0:52.02)
-  most kills in any 10s window: 5 (starting 0:44.33)
+bike-c4.mp4
+  duration 0:21.52  |  4 kills  |  1 death(s), K/D 4.0  |  1 streak(s)  |  processed in 8.3s
+  kill types: 3 gun, 1 explosive
+  most kills in one life: 4
+  timeline:
+    0:11.17  (explosive)  [streak 1]
+    0:14.22  (gun)  [streak 1]
+    0:16.13 x2  (gun, gun)  [streak 1]
+    0:19.30  -- died --
 ```
 
 ## Desktop app
 
 ![BF6 Kill Tracker app](docs/gui.png)
 
-1. Click **Add videos…** or **Add folder…**, or drag files onto the window.
-2. Click **Find streaks**. Each video is scanned in the background, with progress shown in the list.
-3. Click a streak to play it in the preview box. The preview is low resolution and has no sound so it starts instantly; click a kill thumbnail to jump to it. **Open in video player** cuts the clip at full quality, with sound.
-4. Changing the streak rules (minimum kills, max time between kills) regroups instantly, with no rescan. Tick **Show all single kills too** to also list kills outside streaks, e.g. a double kill on a tank, so you can tick them into the video.
-5. Untick anything you don't want, set the lead-in and tail, then click **Build highlight video…**. Every ticked clip, from every video, is cut out and joined into one MP4, with short fades between clips and no filler. Clips that overlap or touch are merged so no footage repeats.
+1. **Add videos.** Use **Add videos…** or **Add folder…**, or drag files onto the window.
+   - **Watch folder…** automatically adds and scans new recordings saved to your Battlefield or ShadowPlay folder.
+2. **Scan.** Click **Find streaks**. Each video is scanned in the background.
+   - The list shows kills, deaths, K/D and streaks for each video.
+   - Scans are remembered, so reopening a video is instant.
+3. **Check the results.** The streak list shows kill types (headshot, gun, explosive) for each clip.
+   - **Show all single kills too** also lists kills outside streaks.
+   - Streak rules (minimum kills, time between kills, which kill types count) regroup the list instantly. A death always ends a streak.
+4. **Preview and trim.** Click a clip to play it in the preview box: low resolution, no sound, starts instantly.
+   - Set each clip's exact start and end with **[ Start here** / **End here ]**, or type the times.
+   - **Open in video player** plays the clip at full quality, with sound.
+5. **Order the clips.** The **Clip order** tab sets the order of clips in the video: drag them, or use *Best streak last*.
+6. **Build.** Click **Build highlight video…**. Options:
+   - **Export preset:** YouTube 1440p60 / 1080p60, Vertical 9:16 (TikTok, Shorts, Reels; centred on the crosshair and the kill notification), Discord (under 25 MB), or GIF.
+   - **Music:** set its volume, optionally lower it while the game is loud, and optionally cut clips on the beat.
+   - **Extras:** kill call-outs (DOUBLE KILL, 4 KILL STREAK), a clip title, and a slow-motion replay of the best kill in each clip.
+   - **Encoder:** GPU (NVIDIA, Intel, AMD) on Windows when available, otherwise the CPU.
+7. **Save your work.** **Save project…** / **Open project…** keep your videos, ticked clips, trims, order and settings.
+8. **See your stats.** **Library & stats** shows every scanned session: best streaks, K/D, kills per hour and headshot rate.
 
-Clips from recordings with different resolutions or frame rates are scaled to match. You can pick the output resolution and frame rate.
+The app checks GitHub for new releases at start-up and shows a button when one is available.
 
 ## Install
 
-You need Python 3.9 or newer (3.9 to 3.14 are tested). ffmpeg is bundled through `imageio-ffmpeg`, so you don't have to install it separately. If an `ffmpeg` is already on your PATH, the tracker uses that one instead.
+**Windows, no Python needed:**
+1. Download `BF6KillTracker-windows.zip` from the repository's Releases page. Every commit's build is also available from the Actions tab, under *windows-build*.
+2. Unzip it.
+3. Run `BF6KillTracker.exe`. The same exe also takes the command-line arguments shown below.
 
-**Windows:** install Python from python.org, then double-click `bf6killtracker.bat`. The first run sets everything up and then opens the app. From a terminal, the same file runs the command line, e.g. `bf6killtracker.bat analyze "C:\Videos\clip.mp4" --reel highlights.mp4`.
+**From source (any OS):** you need Python 3.9 or newer; 3.9, 3.12, 3.14 and 3.15 are tested. ffmpeg is bundled through `imageio-ffmpeg`.
+- Windows: double-click `bf6killtracker.bat`.
+- macOS / Linux: double-click `BF6 Kill Tracker.command`.
 
-**macOS / Linux:** double-click (or run) `BF6 Kill Tracker.command`, which works the same way. To install manually:
+Both launchers install everything on first run, and again whenever `requirements.txt` changes. To set it up by hand:
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python -m bf6killtracker            # opens the app
-.venv/bin/python -m bf6killtracker analyze ~/Videos/clip.mp4
 ```
 
-## Usage
+## Command line
 
 ```sh
 python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
@@ -49,48 +67,46 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 
 | Option | Meaning |
 |---|---|
-| `--json FILE` / `--csv FILE` | Save results (CSV has one row per kill). |
-| `--json-stdout` | Print JSON instead of the text report. |
-| `--reel FILE.mp4` | Join every streak from all inputs into one highlight video. |
-| `--clips DIR` | Export a separate clip of every streak into DIR. |
-| `--clip-every-kill` | With `--clips`, also export each kill. |
-| `--pad-before 4 --pad-after 3` | Seconds of video around exported clips. |
-| `--streak-gap 5` | Max seconds between kills in the same streak. |
-| `--streak-min 3` | Kills needed to count as a streak. |
-| `--window 10` | Also report the most kills in any 10-second window. |
-| `--sample-fps 30` | Analyse fewer frames per second. |
-| `--hud-scale 0.9` | Set this if you changed the in-game HUD scale. |
+| `--json FILE` / `--csv FILE` | Save results. The CSV has one row per kill or death, with types and weapons. |
+| `--reel FILE.mp4` | Join every streak from all inputs into one highlight video (`.gif` for a GIF). |
+| `--preset NAME` | Export preset, e.g. `"YouTube 1080p60"` or `"Discord (under 25 MB)"`. |
+| `--music FILE --beat-sync` | Add background music, optionally cutting on the beat. |
+| `--overlays --titles --replay` | Kill call-outs, clip titles, slow-mo replays. |
+| `--max-mb N`, `--encoder NAME` | File-size limit; encoder choice. |
+| `--clips DIR` | Also export each streak as a separate clip. |
+| `--streak-gap 5 --streak-min 3` | What counts as a streak. |
+| `--streak-type headshot` | Only count these kill types toward streaks. |
+| `--rescan`, `--no-feed` | Ignore remembered scans; skip the kill feed (faster, but no deaths or kill types). |
+| `--hud-scale 0.9` | Force a HUD scale. Normally detected automatically. |
 
-Folders are scanned for `.mp4 .mkv .mov .avi .webm .m4v .ts` files.
-
-A kill entry like `0:44.33 x2` means one notification added two skulls at once, for example a grenade or mine multi-kill.
-
-### Checking the HUD alignment
-
-If results look wrong on your recordings (a different HUD scale, or a non-16:9 resolution), grab a frame where a skull is visible:
-
-```sh
-python -m bf6killtracker calibrate clip.mp4 --at 52.5
-```
-
-This writes a PNG with the detection boxes drawn on it. A green box means a skull was detected there. The boxes should sit on the skull icons; if they don't, try `--hud-scale`.
+`calibrate clip.mp4 --at 52.5` writes a PNG showing where the detector looks.
 
 ## How it works
 
-1. Only a small strip of each frame around the kill notification is decoded (ffmpeg crops it), and every video is rescaled to 2560×1440 coordinates first, so 1080p, 1440p and 4K all use the same layout.
-2. Each of the 5 icon slots is matched against white-skull and red headshot-skull templates. The templates include motion-blurred variants, and matches must pass contrast and colour checks. The yellow order icon and the damage-assist icon are rejected.
-3. A new kill is recognised in either of two ways:
-   - **pop**: the translucent square that animates in, followed by a skull settling in the rightmost slot;
-   - **appear**: a skull settling into an otherwise empty HUD, for when motion blur hides the pop.
-4. Skulls that blink, or reappear after smoke, flashes or the scoreboard briefly hid them, are not counted again.
-5. The number of skulls added tells multi-kills apart from single kills.
-6. Kills are grouped into streaks whenever each one follows the previous within `--streak-gap` seconds.
+1. **Auto-calibration.** A few keyframes are searched for skulls at several sizes. This sets the HUD scale and position, so other HUD scales, resolutions and ultrawide recordings work without settings.
+2. **Decoding.** One ffmpeg pass decodes only two small regions of each frame: the kill notification and the kill feed. Frames are then processed in parallel. GPU decoding is used on Windows, with an automatic fallback to software decoding.
+3. **Skulls.** Each icon slot is matched against white and red (headshot) skull templates, with contrast and colour checks. Look-alike icons are rejected: assist, order, revive, and the vehicle-destroyed gear. A new kill is the pop-in animation followed by a skull settling in, or a skull appearing on an empty HUD.
+4. **Kill feed.** Rows with your "▸" marker are tracked as they slide in and scroll up.
+   - Marker on the killer side: your kill. The weapon icon and the red headshot skull give the kill type.
+   - Marker on the victim side: a death.
+   - Feed kills the skulls missed (smoke, scoreboard open) are added.
+5. **Streaks and lives.** Kills are grouped into streaks (each kill within N seconds of the last, never across a death) and into lives (kills between deaths).
+
+Weapon icons live in `bf6killtracker/templates/weapons/<category>_<name>.png`. Add a cropped icon there to teach it a new weapon. Unknown weapons show as `other`.
 
 ## Accuracy
 
-On the bundled reference clip (`quick-19-killstreak.mp4`, 2560×1440, variable-frame-rate HEVC), all 18 kills were found with correct multi-kill counts and no false positives. The ground truth was checked by hand against the skulls and the kill feed. The result was the same at 60 fps, at 30 fps, and on a 1080p/30 fps re-encode of the clip.
+All results below were checked by hand against the skulls and the kill feed.
 
-That is one clip from one player's settings. Different HUD scale, colour-blind modes, or HUD mods may need `--hud-scale` or new templates in `bf6killtracker/templates/`.
+| Clip | Kills | Deaths | Kill types | Notes |
+|---|---|---|---|---|
+| `quick-19-killstreak.mp4` (1:32) | 18 | 1 | 7 gun, 6 explosive, 4 headshot, 1 other | |
+| `Battlefield 6 - 2026-06-14 …` (0:28) | 7 | 0 | correct | Includes a 4-kill burst and a squad revive, which is not counted. |
+| `bike-c4.mp4` (0:22) | 4 | 1 | correct | C4 tank kill, kills over yellow flowers, then a death. |
+
+Re-encodes at 30 fps, at 1080p, at HUD scale 0.85 and at ultrawide 3440×1440 gave the same kills.
+
+Detection still depends on the default kill-feed and HUD colours. Colour-blind modes may need new templates.
 
 ## Tests
 
@@ -98,4 +114,4 @@ That is one clip from one player's settings. Different HUD scale, colour-blind m
 python -m pytest -q
 ```
 
-The unit, highlight-reel and GUI tests (headless Qt) use generated data and run on every OS (see `.github/workflows/tests.yml` for Windows, macOS and Linux CI). `tests/test_sample_video.py` runs end-to-end on the reference clip when it exists at `~/Downloads/quick-19-killstreak.mp4`, or at the path set in `BF6KT_SAMPLE`.
+Unit, reel, GUI (headless Qt), kill-feed, calibration and workflow tests use generated data and run in CI on Windows, macOS and Linux. The end-to-end tests run on the reference clips when they're in `~/Downloads`.

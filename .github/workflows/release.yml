@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,17 +21,20 @@ jobs:
       - run: python -m pip install -r requirements.txt pyinstaller==6.16.0
       - name: Build
         run: >
-          pyinstaller --noconfirm --clean --windowed --name BF6KillTracker
-          --collect-data bf6killtracker --collect-binaries imageio_ffmpeg
+          pyinstaller --noconfirm --clean --windowed --name BF6KillTracker --paths .
+          --collect-submodules bf6killtracker --collect-data bf6killtracker --collect-binaries imageio_ffmpeg
           --exclude-module pytest packaging/app.py
       - name: Smoke test the exe
         shell: pwsh
+        timeout-minutes: 5
         run: |
           $exe = "dist/BF6KillTracker/BF6KillTracker.exe"
           python -c "import imageio_ffmpeg,subprocess; subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(),'-v','error','-f','lavfi','-i','testsrc=size=1280x720:rate=30','-t','2','-pix_fmt','yuv420p','smoke.mp4'],check=True)"
-          $p = Start-Process $exe -ArgumentList "--version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput ver.txt
-          Get-Content ver.txt
-          $p = Start-Process $exe -ArgumentList "analyze","smoke.mp4","--json","smoke.json","-q" -Wait -PassThru -NoNewWindow
+          $p = Start-Process $exe -ArgumentList "--version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput ver.txt -RedirectStandardError err.txt
+          Get-Content ver.txt, err.txt
+          if ($p.ExitCode -ne 0) { throw "--version failed: $($p.ExitCode)" }
+          $p = Start-Process $exe -ArgumentList "analyze","smoke.mp4","--json","smoke.json","-q" -Wait -PassThru -NoNewWindow -RedirectStandardError err2.txt
+          Get-Content err2.txt
           if ($p.ExitCode -ne 0) { throw "analyze failed: $($p.ExitCode)" }
           Get-Content smoke.json
       - run: Compress-Archive -Path dist/BF6KillTracker -DestinationPath BF6KillTracker-windows.zip
