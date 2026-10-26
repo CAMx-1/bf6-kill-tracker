@@ -222,6 +222,8 @@ def find_streaks(kills: List[KillEvent], max_gap: float = 5.0, min_kills: int = 
     """
     streaks: List[Streak] = []
     group: List[KillEvent] = []
+    for k in kills:
+        k.streak_id = -1   # reset tags from any previous grouping
 
     def flush():
         total = sum(k.count for k in group)

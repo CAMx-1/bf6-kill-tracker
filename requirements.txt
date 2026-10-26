@@ -1,5 +1,8 @@
-numpy==1.26.4
+# Exact versions, chosen per Python version so new Python releases install prebuilt wheels
+numpy==1.26.4; python_version < "3.12"
+numpy==2.5.4; python_version >= "3.12"
 opencv-python-headless==4.10.0.84
 imageio-ffmpeg==0.6.0
-PySide6-Essentials==6.7.3
+PySide6-Essentials==6.7.3; python_version < "3.10"
+PySide6-Essentials==6.12.0; python_version >= "3.10"
 pytest==8.3.3

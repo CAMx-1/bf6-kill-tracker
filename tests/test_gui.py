@@ -40,7 +40,8 @@ def video(tmp_path):
 
 
 def test_add_scan_and_build(app, video, tmp_path):
-    w = MainWindow()
+    from PySide6.QtCore import QSettings
+    w = MainWindow(QSettings(str(tmp_path / "settings.ini"), QSettings.IniFormat))  # fresh defaults
     w.cb_open.setChecked(False)
     assert w.add_paths([video, video]) == 1          # duplicates ignored
     assert w.table.rowCount() == 1
@@ -63,6 +64,31 @@ def test_add_scan_and_build(app, video, tmp_path):
     from PySide6.QtCore import Qt
     w.tree.topLevelItem(0).child(0).setCheckState(0, Qt.Unchecked)
     assert "1 streak(s), 4 kills" in w.lbl_reel.text()
+
+    # single kills outside streaks (e.g. a double kill on a tank) can be shown and ticked in
+    w.videos[0].result.kills.append(KillEvent(8.0, count=2))
+    w.videos[0].result.kills.sort(key=lambda k: k.time)
+    w.sp_gap.setValue(2.0)                            # regroups: 8 s is now outside both streaks
+    w.cb_singles.setChecked(False)
+    w._rebuild_tree()
+    assert w.tree.topLevelItem(0).childCount() == 2
+    w.cb_singles.setChecked(True)
+    top = w.tree.topLevelItem(0)
+    assert [top.child(i).text(0) for i in range(top.childCount())] == ["Streak 1", "Double kill", "Streak 2"]
+    assert "1 other kill clip(s)" in w.lbl_reel.text() and "6 kills" in w.lbl_reel.text()
+
+    # in-app preview: selecting a clip plays it at thumbnail size
+    w.tree.setCurrentItem(top.child(2))
+    assert wait_until(app, lambda: w.preview.screen_lbl.pixmap() is not None
+                      and not w.preview.screen_lbl.pixmap().isNull(), timeout=20)
+    assert wait_until(app, lambda: w.preview.pos > 0.5, timeout=20)   # it's actually playing
+    w.preview.toggle()
+    paused_at = w.preview.pos
+    for _ in range(30):
+        app.processEvents()
+        time.sleep(0.02)
+    assert abs(w.preview.pos - paused_at) < 0.1                       # and pauses
+    top.child(1).setCheckState(0, Qt.Unchecked)                         # leave the double kill out
 
     out = str(tmp_path / "reel.mp4")
     w.start_reel(out)

@@ -24,8 +24,9 @@ from PySide6.QtWidgets import (
 from . import __version__
 from .analyzer import AnalysisResult, Cancelled, analyze
 from .cli import VIDEO_EXTS, fmt_time
-from .events import Streak, find_streaks
+from .events import KillEvent, Streak, find_streaks
 from .reel import ReelCancelled, Segment, build_reel, plan_segments
+from .preview import PreviewPlayer
 from .video import cut_clip, find_ffmpeg, grab_frame, probe
 
 APP_NAME = "BF6 Kill Tracker"
@@ -43,6 +44,27 @@ def open_with_system(path: str) -> None:
 
 
 @dataclass
+class Clip:
+    """Something that can go into the highlight video: a streak or a kill outside streaks."""
+    key: str                  # stable id used for the tick-box state
+    kind: str                 # "streak" or "kill"
+    start: float              # first kill
+    end: float                # last kill
+    kills: int
+    events: List[KillEvent]
+    title: str
+
+    @property
+    def span(self) -> str:
+        d = self.end - self.start
+        return f"{d:.1f}s" if d >= 0.5 else ("at once" if self.kills > 1 else "")
+
+
+def _kill_title(count: int) -> str:
+    return {1: "Kill", 2: "Double kill", 3: "Triple kill"}.get(count, f"{count}× multi-kill")
+
+
+@dataclass
 class VideoEntry:
     path: str
     duration: float = 0.0
@@ -51,12 +73,30 @@ class VideoEntry:
     result: Optional[AnalysisResult] = None
     streaks: List[Streak] = field(default_factory=list)
     error: str = ""
-    # streak index -> included in the reel
-    selected: Dict[int, bool] = field(default_factory=dict)
+    # clip key -> ticked for the highlight video
+    selected: Dict[str, bool] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
+
+    def clips(self, include_singles: bool) -> List[Clip]:
+        """Streaks, plus (optionally) kills that aren't part of a streak, in time order."""
+        if not self.result:
+            return []
+        out: List[Clip] = []
+        for st in self.streaks:
+            ev = [k for k in self.result.kills if k.streak_id == st.id]
+            out.append(Clip(f"s{st.start:.3f}", "streak", st.start, st.end, st.kills, ev, f"Streak {st.id + 1}"))
+        if include_singles:
+            for k in self.result.kills:
+                if k.streak_id < 0:
+                    out.append(Clip(f"k{k.time:.3f}", "kill", k.time, k.time, k.count, [k], _kill_title(k.count)))
+        out.sort(key=lambda c: c.start)
+        return out
+
+    def is_selected(self, clip: Clip) -> bool:
+        return self.selected.get(clip.key, True)
 
 
 # ----------------------------------------------------------------------------
@@ -170,12 +210,12 @@ class ThumbWorker(Worker):
 class MainWindow(QMainWindow):
     COLS = ["Video", "Length", "Status", "Kills", "Streaks"]
 
-    def __init__(self):
+    def __init__(self, settings: Optional[QSettings] = None):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} {__version__}")
-        self.resize(1280, 820)
+        self.resize(1320, 900)
         self.setAcceptDrops(True)
-        self.settings = QSettings("bf6killtracker", "gui")
+        self.settings = settings or QSettings("bf6killtracker", "gui")
         self.videos: List[VideoEntry] = []
         self._threads: list = []  # (QThread, Worker) pairs kept alive while running
         self._analyze_worker: Optional[AnalyzeWorker] = None
@@ -237,6 +277,12 @@ class MainWindow(QMainWindow):
         self.sp_gap.setSuffix(" s")
         form.addRow("At least", self.sp_min)
         form.addRow("Max time between kills", self.sp_gap)
+        self.cb_singles = QCheckBox("Show all single kills too")
+        self.cb_singles.setToolTip("List kills that aren't part of a streak (e.g. a double kill on a tank) "
+                                   "so you can tick them into the highlight video")
+        self.cb_singles.setChecked(self.settings.value("show_singles", "false") == "true")
+        self.cb_singles.toggled.connect(self._on_singles_toggled)
+        form.addRow("", self.cb_singles)
         self.sp_min.valueChanged.connect(self._regroup_all)
         self.sp_gap.valueChanged.connect(self._regroup_all)
 
@@ -247,39 +293,46 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.table, 1)
         lv.addWidget(self.empty_hint)
         lv.addWidget(opts)
+        self._left_layout = lv
 
         # right: streak tree + thumbnails + reel
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Streak", "Kills", "Time", "Length"])
+        self.tree.setHeaderLabels(["Clip", "Kills", "Time", "Length"])
         self.tree.setRootIsDecorated(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
         for c in (1, 2, 3):
             self.tree.header().setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._on_tree_check)
-        self.tree.currentItemChanged.connect(self._on_streak_selected)
-        self.tree.itemDoubleClicked.connect(lambda *_: self.preview_streak())
+        self.tree.currentItemChanged.connect(self._on_clip_selected)
+        self.tree.itemDoubleClicked.connect(lambda *_: self.preview.toggle())
 
         sel_row = QHBoxLayout()
         b_all = QPushButton("Select all")
         b_all.clicked.connect(lambda: self._set_all_checks(True))
         b_none = QPushButton("Select none")
         b_none.clicked.connect(lambda: self._set_all_checks(False))
-        self.btn_preview = QPushButton(self.style().standardIcon(QStyle.SP_MediaPlay), "Preview streak")
+        self.btn_preview = QPushButton(self.style().standardIcon(QStyle.SP_DirLinkIcon), "Open in video player")
+        self.btn_preview.setToolTip("Cut this clip at full quality (with sound) and open it in your video player")
         self.btn_preview.clicked.connect(self.preview_streak)
         sel_row.addWidget(b_all)
         sel_row.addWidget(b_none)
         sel_row.addStretch(1)
         sel_row.addWidget(self.btn_preview)
 
+        # in-app preview (thumbnail quality, no sound) + a frame from each kill
+        self.preview = PreviewPlayer()
         self.thumb_box = QWidget()
-        self.thumb_layout = QHBoxLayout(self.thumb_box)
+        self.thumb_layout = QVBoxLayout(self.thumb_box)
         self.thumb_layout.setContentsMargins(4, 4, 4, 4)
         self.thumb_layout.addStretch(1)
         thumbs = QScrollArea()
         thumbs.setWidget(self.thumb_box)
         thumbs.setWidgetResizable(True)
-        thumbs.setFixedHeight(230)
-        self.thumb_title = QLabel("Select a streak to see its kills")
+        thumbs.setMinimumWidth(200)
+        self.thumb_title = QLabel("Select a streak to preview it")
+        prev_row = QHBoxLayout()
+        prev_row.addWidget(self.preview)
+        prev_row.addWidget(thumbs, 1)
 
         reel = QGroupBox("Highlight reel")
         rf = QFormLayout(reel)
@@ -299,7 +352,7 @@ class MainWindow(QMainWindow):
         self.cb_fps.addItems(["Same as first video", "60 fps", "30 fps"])
         self.cb_open = QCheckBox("Open the video when it’s done")
         self.cb_open.setChecked(self.settings.value("open_after", "true") == "true")
-        self.lbl_reel = QLabel("No streaks selected")
+        self.lbl_reel = QLabel("Nothing selected")
         self.btn_reel = QPushButton(self.style().standardIcon(QStyle.SP_DialogSaveButton), "Build highlight video…")
         self.btn_reel.setMinimumHeight(34)
         self.btn_reel.clicked.connect(self.build_reel_dialog)
@@ -313,20 +366,21 @@ class MainWindow(QMainWindow):
         self.sp_pre.valueChanged.connect(self._update_reel_summary)
         self.sp_post.valueChanged.connect(self._update_reel_summary)
 
+        self._left_layout.addWidget(reel)
+
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.addWidget(QLabel("<b>Kill streaks</b>  (ticked streaks go into the highlight video)"))
+        rv.addWidget(QLabel("<b>Kill streaks</b>  (ticked clips go into the highlight video)"))
         rv.addWidget(self.tree, 1)
         rv.addLayout(sel_row)
         rv.addWidget(self.thumb_title)
-        rv.addWidget(thumbs)
-        rv.addWidget(reel)
+        rv.addLayout(prev_row)
 
         split = QSplitter()
         split.addWidget(left)
         split.addWidget(right)
-        split.setSizes([480, 800])
+        split.setSizes([500, 820])
         central = QWidget()
         cl = QVBoxLayout(central)
         cl.setContentsMargins(8, 8, 8, 8)
@@ -439,11 +493,15 @@ class MainWindow(QMainWindow):
                 return
 
     def _regroup(self, v: VideoEntry) -> None:
-        if not v.result:
-            return
-        old = {(s.start, s.end): v.selected.get(s.id, True) for s in v.streaks}
-        v.streaks = find_streaks(v.result.kills, self.sp_gap.value(), self.sp_min.value())
-        v.selected = {s.id: old.get((s.start, s.end), True) for s in v.streaks}
+        if v.result:
+            v.streaks = find_streaks(v.result.kills, self.sp_gap.value(), self.sp_min.value())
+
+    def _show_singles(self) -> bool:
+        return self.cb_singles.isChecked()
+
+    def _on_singles_toggled(self, on: bool) -> None:
+        self.settings.setValue("show_singles", "true" if on else "false")
+        self._rebuild_tree()
 
     def _regroup_all(self) -> None:
         self.settings.setValue("streak_min", self.sp_min.value())
@@ -454,47 +512,60 @@ class MainWindow(QMainWindow):
         self._rebuild_tree()
 
     def _rebuild_tree(self) -> None:
+        cur = self._current_clip()
+        cur_key = (cur[0].path, cur[1].key) if cur[1] else None
         self.tree.blockSignals(True)
         self.tree.clear()
+        restore = None
         for vi, v in enumerate(self.videos):
             if not v.result:
                 continue
-            top = QTreeWidgetItem([v.name, str(sum(s.kills for s in v.streaks)), "", ""])
-            top.setData(0, Qt.UserRole, (vi, -1))
+            clips = v.clips(self._show_singles())
+            top = QTreeWidgetItem([v.name, str(sum(c.kills for c in clips)), "", ""])
+            top.setData(0, Qt.UserRole, (vi, None))
             top.setFlags(top.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
-            top.setFirstColumnSpanned(False)
             f = top.font(0)
             f.setBold(True)
             top.setFont(0, f)
-            if not v.streaks:
+            if not clips:
                 top.setText(0, f"{v.name}  — no streaks ({v.result.total_kills} kills)")
             self.tree.addTopLevelItem(top)
-            for s in v.streaks:
-                child = QTreeWidgetItem([f"Streak {s.id + 1}", str(s.kills),
-                                         f"{fmt_time(s.start)} – {fmt_time(s.end)}",
-                                         f"{s.duration:.1f}s" if s.duration >= 0.5 else "at once"])
-                child.setData(0, Qt.UserRole, (vi, s.id))
+            for c in clips:
+                child = QTreeWidgetItem([c.title, str(c.kills),
+                                         fmt_time(c.start) if c.kind == "kill" else
+                                         f"{fmt_time(c.start)} – {fmt_time(c.end)}", c.span])
+                child.setData(0, Qt.UserRole, (vi, c.key))
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                child.setCheckState(0, Qt.Checked if v.selected.get(s.id, True) else Qt.Unchecked)
+                child.setCheckState(0, Qt.Checked if v.is_selected(c) else Qt.Unchecked)
                 child.setTextAlignment(1, Qt.AlignCenter)
+                if c.kind == "kill":
+                    fi = child.font(0)
+                    fi.setItalic(True)
+                    child.setFont(0, fi)
                 top.addChild(child)
+                if cur_key == (v.path, c.key):
+                    restore = child
             top.setExpanded(True)
         self.tree.blockSignals(False)
+        if restore is not None:
+            self.tree.setCurrentItem(restore)
+        elif cur_key:
+            self._on_clip_selected()
         self._update_reel_summary()
 
     def _on_tree_check(self, item: QTreeWidgetItem, col: int) -> None:
         data = item.data(0, Qt.UserRole)
         if not data or col != 0:
             return
-        vi, sid = data
-        if sid >= 0:
-            self.videos[vi].selected[sid] = item.checkState(0) == Qt.Checked
+        vi, key = data
+        if key is not None:
+            self.videos[vi].selected[key] = item.checkState(0) == Qt.Checked
             self._update_reel_summary()
 
     def _set_all_checks(self, on: bool) -> None:
         for v in self.videos:
-            for s in v.streaks:
-                v.selected[s.id] = on
+            for c in v.clips(self._show_singles()):
+                v.selected[c.key] = on
         self._rebuild_tree()
 
     def _on_video_selected(self) -> None:
@@ -508,16 +579,16 @@ class MainWindow(QMainWindow):
                 self.tree.setCurrentItem(top.child(0) if top.childCount() else top)
                 self.tree.scrollToItem(top)
 
-    def _current_streak(self):
+    def _current_clip(self):
         it = self.tree.currentItem()
         if not it or not it.data(0, Qt.UserRole):
             return None, None
-        vi, sid = it.data(0, Qt.UserRole)
-        if sid < 0:
+        vi, key = it.data(0, Qt.UserRole)
+        if key is None or vi >= len(self.videos):
             return None, None
         v = self.videos[vi]
-        s = next((x for x in v.streaks if x.id == sid), None)
-        return v, s
+        c = next((x for x in v.clips(self._show_singles()) if x.key == key), None)
+        return (v, c) if c else (None, None)
 
     # -- thumbnails --------------------------------------------------------
     def _clear_thumbs(self) -> None:
@@ -526,34 +597,41 @@ class MainWindow(QMainWindow):
             if w:
                 w.deleteLater()
 
-    def _on_streak_selected(self, *_):
-        v, s = self._current_streak()
+    def _on_clip_selected(self, *_):
+        v, c = self._current_clip()
         self._clear_thumbs()
         self._refresh_buttons()
-        if not s:
-            self.thumb_title.setText("Select a streak to see its kills")
+        if not c:
+            self.thumb_title.setText("Select a streak to preview it")
+            self.preview.clear()
             return
-        kills = [k for k in v.result.kills if s.start <= k.time <= s.end]
-        span = f"in {s.duration:.1f}s" if s.duration >= 0.5 else "at once"
-        self.thumb_title.setText(f"{v.name} — streak {s.id + 1}: {s.kills} kills {span} "
-                                 f"(double-click or Preview to watch)")
+        span = f" in {c.span}" if c.kind == "streak" and c.span not in ("", "at once") else (
+            " at once" if c.span == "at once" else "")
+        what = f"{c.kills} kills" if c.kills > 1 else "1 kill"
+        self.thumb_title.setText(f"{v.name} — {c.title.lower() if c.kind == 'kill' else c.title}: {what}{span}  "
+                                 f"(preview has no sound; “Open in video player” for full quality)")
+        seg = self._segments(only=(v, c))[0]
+        self.preview.load(v.path, seg.start, seg.end, autoplay=True)
         self._thumb_req += 1
         self._thumb_slots: Dict[float, QLabel] = {}
-        for k in kills:
+        for k in c.events:
             box = QWidget()
             bl = QVBoxLayout(box)
             bl.setContentsMargins(0, 0, 0, 0)
             img = QLabel("loading…")
-            img.setFixedSize(320, 180)
+            img.setFixedSize(192, 108)
             img.setAlignment(Qt.AlignCenter)
             img.setStyleSheet("background:#222; color:#888; border-radius:4px;")
+            img.setCursor(Qt.PointingHandCursor)
+            img.setToolTip("Click to jump the preview to this kill")
+            img.mousePressEvent = (lambda _e, t=k.time - seg.start: self.preview.seek(max(0.0, t - 1.0)))
             cap = QLabel(f"{fmt_time(k.time)}" + (f"  ×{k.count}" if k.count > 1 else ""))
             cap.setAlignment(Qt.AlignCenter)
             bl.addWidget(img)
             bl.addWidget(cap)
             self.thumb_layout.insertWidget(self.thumb_layout.count() - 1, box)
             self._thumb_slots[k.time] = img
-        self._run_in_thread(ThumbWorker(self._thumb_req, v.path, [k.time for k in kills]),
+        self._run_in_thread(ThumbWorker(self._thumb_req, v.path, [k.time for k in c.events]),
                             lambda w: w.thumb.connect(self._on_thumb))
 
     @Slot(int, float, QImage)
@@ -643,47 +721,49 @@ class MainWindow(QMainWindow):
         self.status.setText("Stopping…")
 
     # -- preview & reel ----------------------------------------------------
+    def _selected_clips(self):
+        return [(v, c) for v in self.videos for c in v.clips(self._show_singles()) if v.is_selected(c)]
+
     def _segments(self, only=None) -> List[Segment]:
-        items = []
-        for v in self.videos:
-            for s in v.streaks:
-                if only is not None:
-                    if (v, s) != only:
-                        continue
-                elif not v.selected.get(s.id, True):
-                    continue
-                items.append((v.path, s.start, s.end, f"{v.name} streak {s.id + 1} ({s.kills} kills)"))
+        pairs = [only] if only is not None else self._selected_clips()
+        items = [(v.path, c.start, c.end, f"{v.name} {c.title.lower()} ({c.kills} kills)") for v, c in pairs]
         return plan_segments(items, {v.path: v.duration for v in self.videos},
                              self.sp_pre.value(), self.sp_post.value(), order=[v.path for v in self.videos])
 
     def _update_reel_summary(self) -> None:
         self.settings.setValue("pad_before", self.sp_pre.value())
         self.settings.setValue("pad_after", self.sp_post.value())
-        segs = self._segments()
-        n = sum(1 for v in self.videos for s in v.streaks if v.selected.get(s.id, True))
-        kills = sum(s.kills for v in self.videos for s in v.streaks if v.selected.get(s.id, True))
+        sel = self._selected_clips()
+        n_streaks = sum(1 for _, c in sel if c.kind == "streak")
+        n_singles = len(sel) - n_streaks
+        kills = sum(c.kills for _, c in sel)
         src = sum(v.duration for v in self.videos if v.result)
-        if not n:
-            self.lbl_reel.setText("No streaks selected")
+        if not sel:
+            self.lbl_reel.setText("Nothing selected")
         else:
-            total = sum(s.duration for s in segs)
-            self.lbl_reel.setText(f"{n} streak(s), {kills} kills → {fmt_time(total)} of video "
+            total = sum(g.duration for g in self._segments())
+            parts = [f"{n_streaks} streak(s)"] + ([f"{n_singles} other kill clip(s)"] if n_singles else [])
+            self.lbl_reel.setText(f"{', '.join(parts)}, {kills} kills → {fmt_time(total)} of video "
                                   f"(from {fmt_time(src)} of footage)")
         self._refresh_buttons()
 
     def preview_streak(self) -> None:
-        v, s = self._current_streak()
-        if not s:
+        """Full-quality preview (with sound) in the system video player."""
+        v, c = self._current_clip()
+        if not c:
             return
-        seg = self._segments(only=(v, s))[0]
-        out = os.path.join(tempfile.gettempdir(), f"bf6kt_preview_{abs(hash((v.path, s.start))) % 10**8}.mp4")
+        if self.preview.playing:
+            self.preview.toggle()   # pause the in-app preview while the player opens
+        seg = self._segments(only=(v, c))[0]
+        out = os.path.join(tempfile.gettempdir(),
+                           f"bf6kt_preview_{abs(hash((v.path, seg.start, seg.end))) % 10**8}.mp4")
         self.status.setText("Cutting preview…")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             if not os.path.exists(out):
                 cut_clip(v.path, seg.start, seg.end, out)
             open_with_system(out)
-            self.status.setText(f"Opened preview of streak {s.id + 1}.")
+            self.status.setText(f"Opened {c.title.lower()} in your video player.")
         except Exception as exc:
             QMessageBox.warning(self, APP_NAME, f"Couldn't make the preview:\n{exc}")
         finally:
@@ -771,13 +851,13 @@ class MainWindow(QMainWindow):
         self.act_analyze.setEnabled(not busy and has_unscanned)
         self.act_stop.setEnabled(busy)
         self.act_remove.setEnabled(not self._analyze_worker and bool(self.videos))
-        _, s = self._current_streak()
-        self.btn_preview.setEnabled(s is not None)
-        any_sel = any(v.selected.get(s.id, True) for v in self.videos for s in v.streaks)
-        self.btn_reel.setEnabled(not busy and any_sel)
+        _, c = self._current_clip()
+        self.btn_preview.setEnabled(c is not None)
+        self.btn_reel.setEnabled(not busy and bool(self._selected_clips()))
 
     def closeEvent(self, e):  # noqa: N802
         self.stop_work()
+        self.preview.shutdown()
         for th, _ in list(self._threads):
             th.quit()
             th.wait(3000)

@@ -20,14 +20,15 @@ quick-19-killstreak.mp4
 
 1. Click **Add videos…** or **Add folder…**, or drag files onto the window.
 2. Click **Find streaks**. Each video is scanned in the background, with progress shown in the list.
-3. Check the streaks on the right. Click one to see a frame from each kill, or double-click it (or press **Preview streak**) to watch it in your video player. Changing the streak rules (minimum kills, max time between kills) regroups the streaks instantly, with no rescan.
-4. Untick any streak you don't want, set the lead-in and tail, then click **Build highlight video…**. Every ticked streak, from every video, is cut out and joined into one MP4, with short fades between clips and no filler.
+3. Click a streak to play it in the preview box. The preview is low resolution and has no sound so it starts instantly; click a kill thumbnail to jump to it. **Open in video player** cuts the clip at full quality, with sound.
+4. Changing the streak rules (minimum kills, max time between kills) regroups instantly, with no rescan. Tick **Show all single kills too** to also list kills outside streaks, e.g. a double kill on a tank, so you can tick them into the video.
+5. Untick anything you don't want, set the lead-in and tail, then click **Build highlight video…**. Every ticked clip, from every video, is cut out and joined into one MP4, with short fades between clips and no filler. Clips that overlap or touch are merged so no footage repeats.
 
 Clips from recordings with different resolutions or frame rates are scaled to match. You can pick the output resolution and frame rate.
 
 ## Install
 
-You need Python 3.9 or newer. ffmpeg is bundled through `imageio-ffmpeg`, so you don't have to install it separately. If an `ffmpeg` is already on your PATH, the tracker uses that one instead.
+You need Python 3.9 or newer (3.9 to 3.14 are tested). ffmpeg is bundled through `imageio-ffmpeg`, so you don't have to install it separately. If an `ffmpeg` is already on your PATH, the tracker uses that one instead.
 
 **Windows:** install Python from python.org, then double-click `bf6killtracker.bat`. The first run sets everything up and then opens the app. From a terminal, the same file runs the command line, e.g. `bf6killtracker.bat analyze "C:\Videos\clip.mp4" --reel highlights.mp4`.
 
