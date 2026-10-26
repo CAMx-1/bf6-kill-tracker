@@ -29,6 +29,17 @@ import numpy as np
 NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
+def hwaccel_args() -> List[str]:
+    """Hardware video decoding flags (``BF6KT_HWACCEL``: ``auto``, ``none``, or an ffmpeg hwaccel name).
+
+    Default: ``auto`` on Windows (NVIDIA/AMD/Intel GPUs decode 1440p HEVC far faster
+    than the CPU); off elsewhere. Frames are copied back to memory automatically, and
+    ffmpeg falls back to software decoding when no GPU decoder is available.
+    """
+    mode = os.environ.get("BF6KT_HWACCEL", "auto" if sys.platform == "win32" else "none").strip().lower()
+    return [] if mode in ("", "none", "off", "0") else ["-hwaccel", mode]
+
+
 def find_ffmpeg() -> str:
     env = os.environ.get("BF6KT_FFMPEG")
     if env and os.path.isfile(env):
@@ -185,34 +196,38 @@ def read_multi_roi_frames(
         parts.append(f"[s{i}]crop={ew}:{eh}:{ex}:{ey},format=bgr24,crop={w}:{h}:{x - ex}:{y - ey},"
                      f"pad={W}:{h}:0:0[c{i}]")
     parts.append("".join(f"[c{i}]" for i in range(len(rois))) + f"vstack=inputs={len(rois)}[out]")
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-i", path, "-an", "-sn",
-           "-filter_complex", ";".join(parts), "-map", "[out]",
-           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    frame_bytes = W * H * 3
-    with tempfile.TemporaryFile() as errf:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf,
-                                bufsize=frame_bytes * 2, **NO_WINDOW)
-        killed = False
-        try:
-            idx = 0
-            assert proc.stdout is not None
-            while True:
-                buf = proc.stdout.read(frame_bytes)
-                if len(buf) < frame_bytes:
-                    break
-                full = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
-                out, y0 = [], 0
-                for (_, _, w, h) in rois:
-                    out.append(full[y0:y0 + h, :w])
-                    y0 += h
-                yield idx / fps, out
-                idx += 1
-        finally:
-            if proc.poll() is None:
-                killed = True
-                proc.kill()
-            proc.wait()
-        if not killed and proc.returncode != 0:
+    for hw in ([hwaccel_args(), []] if hwaccel_args() else [[]]):
+        cmd = [ffmpeg, "-v", "error", "-nostdin", *hw, "-i", path, "-an", "-sn",
+               "-filter_complex", ";".join(parts), "-map", "[out]",
+               "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+        frame_bytes = W * H * 3
+        produced = 0
+        with tempfile.TemporaryFile() as errf:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf,
+                                    bufsize=frame_bytes * 2, **NO_WINDOW)
+            killed = False
+            try:
+                assert proc.stdout is not None
+                while True:
+                    buf = proc.stdout.read(frame_bytes)
+                    if len(buf) < frame_bytes:
+                        break
+                    full = np.frombuffer(buf, np.uint8).reshape(H, W, 3)
+                    out, y0 = [], 0
+                    for (_, _, w, h) in rois:
+                        out.append(full[y0:y0 + h, :w])
+                        y0 += h
+                    yield produced / fps, out
+                    produced += 1
+            finally:
+                if proc.poll() is None:
+                    killed = True
+                    proc.kill()
+                proc.wait()
+            if killed or proc.returncode == 0:
+                return
+            if hw and produced == 0:
+                continue   # GPU decoding failed to start: retry in software
             errf.seek(0)
             msg = errf.read().decode(errors="replace").strip()
             raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {msg[-2000:]}")

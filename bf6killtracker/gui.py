@@ -145,7 +145,7 @@ class AnalyzeWorker(Worker):
                         last[0] = t
                         self.progress.emit(_p, min(0.999, t / _d))
 
-                res = analyze(path, progress=cb)
+                res = analyze(path, progress=cb, use_cache=True)
                 self.finished_one.emit(path, res)
             except Cancelled:
                 self.failed_one.emit(path, "Cancelled")

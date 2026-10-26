@@ -50,7 +50,8 @@ def print_report(r: AnalysisResult) -> None:
     print(f"\n{r.video}")
     deaths = f"  |  {len(r.deaths)} death(s), K/D {r.kd:.1f}" if r.feed_used else ""
     print(f"  duration {fmt_time(r.duration)}  |  {r.total_kills} kills{deaths}  |  "
-          f"{len(r.streaks)} streak(s)  |  processed in {r.processing_s:.1f}s")
+          f"{len(r.streaks)} streak(s)  |  " +
+          ("remembered from an earlier scan" if r.from_cache else f"processed in {r.processing_s:.1f}s"))
     if r.hud:
         print(f"  {r.hud}")
     if r.feed_used and r.kills:
@@ -109,7 +110,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
         try:
             r = analyze(v, sample_fps=a.sample_fps, layout=layout, config=TrackerConfig(),
                         streak_gap=a.streak_gap, streak_min=a.streak_min, window=a.window, progress=progress,
-                        use_feed=not a.no_feed)
+                        use_feed=not a.no_feed, use_cache=not a.rescan)
             if a.streak_type:
                 from .events import find_streaks
                 r.streaks = find_streaks(r.kills, a.streak_gap, a.streak_min, r.deaths, a.streak_type)
@@ -221,6 +222,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also report the most kills inside any window of this many seconds (default 10)")
     an.add_argument("--streak-type", nargs="+", choices=["headshot", "gun", "explosive", "other"],
                     help="only count these kill types toward streaks, e.g. --streak-type headshot")
+    an.add_argument("--rescan", action="store_true", help="ignore remembered results and scan again")
     an.add_argument("--no-feed", action="store_true", help="don't read the kill feed (faster, no deaths/types)")
     an.add_argument("--sample-fps", type=float, default=None,
                     help="analyse at this frame rate (e.g. 30 for speed); default: the video's own rate")

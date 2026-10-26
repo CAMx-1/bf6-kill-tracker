@@ -38,6 +38,7 @@ class AnalysisResult:
     lives: List[Life] = field(default_factory=list)
     feed_used: bool = False
     hud: str = ""            # how the HUD layout was chosen (auto-calibration summary)
+    from_cache: bool = False  # loaded from a remembered scan instead of scanning
 
     @property
     def total_kills(self) -> int:
@@ -92,8 +93,28 @@ def scan_observations(path: str, detector: SkullDetector, sample_fps: Optional[f
 def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[HudLayout] = None,
             config: Optional[TrackerConfig] = None, streak_gap: float = 5.0, streak_min: int = 3,
             window: float = 10.0, progress: Optional[Callable[[float], None]] = None,
-            use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True) -> AnalysisResult:
+            use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True,
+            use_cache: bool = False) -> AnalysisResult:
+    """Scan ``path`` for kills, deaths and streaks.
+
+    With ``use_cache`` a previous scan of the unchanged file (same detection
+    options) is reused, and only the streak grouping is recomputed.
+    """
     started = time.time()
+    cache_opts = {"sample_fps": sample_fps, "feed": use_feed, "auto_calibrate": auto_calibrate,
+                  "layout": None if layout is None else repr(layout), "config": repr(config or TrackerConfig())}
+    if use_cache:
+        from . import cache
+        hit = cache.load(path, cache_opts)
+        if hit is not None:
+            kills, deaths = hit["kills"], hit["deaths"]
+            streaks = find_streaks(kills, streak_gap, streak_min, deaths)
+            best, best_t = max_kills_in_window(kills, window)
+            r = AnalysisResult(path, hit["duration"], hit["fps"], kills, streaks, best, best_t, window,
+                               hit.get("processing_s", 0.0), None, deaths, hit["feed"],
+                               split_lives(kills, deaths, hit["duration"]), hit["feed_used"], hit.get("hud", ""))
+            r.from_cache = True
+            return r
     info = probe(path)
     fps = sample_fps or info.fps
     calibration = None
@@ -147,7 +168,11 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
         kills = fuse_feed(kills, [e for e in feed_events if e.kind == "kill"])
     streaks = find_streaks(kills, streak_gap, streak_min, deaths)
     best, best_t = max_kills_in_window(kills, window)
-    return AnalysisResult(path, info.duration, fps, kills, streaks, best, best_t, window,
-                          time.time() - started, tracker.counts, deaths, feed_events,
-                          split_lives(kills, deaths, info.duration), use_feed,
-                          calibration.describe() if calibration else "manual HUD layout")
+    result = AnalysisResult(path, info.duration, fps, kills, streaks, best, best_t, window,
+                            time.time() - started, tracker.counts, deaths, feed_events,
+                            split_lives(kills, deaths, info.duration), use_feed,
+                            calibration.describe() if calibration else "manual HUD layout")
+    if use_cache:
+        from . import cache
+        cache.save(result, cache_opts)
+    return result
