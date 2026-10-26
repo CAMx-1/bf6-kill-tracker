@@ -12,10 +12,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QSettings, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QFileSystemWatcher, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+    QAbstractItemView, QApplication, QDialog, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QLineEdit, QListWidget, QListWidgetItem, QScrollArea, QSpinBox, QSplitter, QStatusBar, QStyle,
     QTabWidget, QTableWidget, QTableWidgetItem, QToolBar,
@@ -27,6 +27,7 @@ from .analyzer import AnalysisResult, Cancelled, analyze
 from .cli import VIDEO_EXTS, fmt_time
 from .events import KillEvent, Streak, find_streaks
 from .reel import PRESETS, ReelCancelled, ReelOptions, Segment, apply_preset, build_reel, plan_segments
+from . import library
 from .preview import PreviewPlayer
 from .video import cut_clip, find_ffmpeg, grab_frame, probe
 
@@ -216,6 +217,70 @@ class ThumbWorker(Worker):
                 pass
 
 
+class LibraryDialog(QDialog):
+    """Every scanned session with totals: best streaks, kills per hour, headshot rate, K/D."""
+    open_videos = Signal(list)
+    COLS = ["Recorded", "Video", "Length", "Kills", "Deaths", "K/D", "Best streak", "Best life", "Kills/hour",
+            "Headshots"]
+
+    def __init__(self, parent, streak_gap: float, streak_min: int):
+        super().__init__(parent)
+        self.setWindowTitle("Library & stats")
+        self.resize(1000, 560)
+        self.sessions = library.sessions(streak_gap, streak_min)
+        tot = library.totals(self.sessions)
+        lay = QVBoxLayout(self)
+        summary = QLabel(
+            f"<b>{tot['videos']}</b> videos, <b>{fmt_time(tot['hours'] * 3600)}</b> of footage &nbsp;·&nbsp; "
+            f"<b>{tot['kills']}</b> kills, <b>{tot['deaths']}</b> deaths, K/D <b>{tot['kd']:.2f}</b> &nbsp;·&nbsp; "
+            f"<b>{tot['kills_per_hour']:.0f}</b> kills/hour &nbsp;·&nbsp; "
+            f"headshots <b>{tot['headshot_rate'] * 100:.0f}%</b> &nbsp;·&nbsp; "
+            f"best streak <b>{tot['best_streak']}</b>, most kills in one life <b>{tot['best_life']}</b>")
+        summary.setWordWrap(True)
+        lay.addWidget(summary)
+        self.table = QTableWidget(len(self.sessions), len(self.COLS))
+        self.table.setHorizontalHeaderLabels(self.COLS)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        best = max((s.best_streak for s in self.sessions), default=-1)
+        for r, se in enumerate(reversed(self.sessions)):
+            vals = [time.strftime("%Y-%m-%d %H:%M", time.localtime(se.recorded)), se.name, fmt_time(se.duration),
+                    se.kills, se.deaths if se.feed_used else "–", f"{se.kd:.1f}" if se.feed_used else "–",
+                    se.best_streak, se.best_life, f"{se.kills_per_hour:.0f}",
+                    f"{se.headshot_rate * 100:.0f}%" if se.feed_used else "–"]
+            for c, val in enumerate(vals):
+                it = QTableWidgetItem()
+                it.setData(Qt.DisplayRole, val)
+                if c == 1:
+                    it.setToolTip(se.video)
+                    it.setData(Qt.UserRole, se.video)
+                if c == 6 and se.best_streak == best and best > 0:
+                    it.setForeground(QColor("#e67e22"))
+                self.table.setItem(r, c, it)
+        self.table.setSortingEnabled(True)
+        lay.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        b_open = QPushButton("Add selected to the project")
+        b_open.clicked.connect(self._open_selected)
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(QLabel("Stats come from every video you've scanned (remembered scans)."))
+        row.addStretch(1)
+        row.addWidget(b_open)
+        row.addWidget(b_close)
+        lay.addLayout(row)
+        self.table.itemDoubleClicked.connect(lambda *_: self._open_selected())
+
+    def _open_selected(self) -> None:
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        paths = [self.table.item(r, 1).data(Qt.UserRole) for r in sorted(rows)]
+        if paths:
+            self.open_videos.emit(paths)
+            self.accept()
+
+
 # ----------------------------------------------------------------------------
 # main window
 # ----------------------------------------------------------------------------
@@ -234,6 +299,18 @@ class MainWindow(QMainWindow):
         self._reel_worker: Optional[ReelWorker] = None
         self._thumb_req = 0
         self._build_ui()
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.directoryChanged.connect(lambda *_: self._watch_timer.start())
+        self._watch_timer = QTimer(self)        # debounce: recordings are written over several seconds
+        self._watch_timer.setSingleShot(True)
+        self._watch_timer.setInterval(3000)
+        self._watch_timer.timeout.connect(self._check_watch_folder)
+        self._watch_sizes: Dict[str, int] = {}
+        self._watch_known: set = set()
+        self._project_path: Optional[str] = None
+        wd = self.settings.value("watch_dir", "")
+        if wd and os.path.isdir(wd) and self.settings.value("watching", "false") == "true":
+            self.start_watching(wd)
         self._refresh_buttons()
 
     # -- layout ------------------------------------------------------------
@@ -255,11 +332,25 @@ class MainWindow(QMainWindow):
         self.act_analyze.triggered.connect(self.start_analysis)
         self.act_stop = QAction(st.standardIcon(QStyle.SP_BrowserStop), "Stop", self)
         self.act_stop.triggered.connect(self.stop_work)
+        self.act_open = QAction(st.standardIcon(QStyle.SP_DialogOpenButton), "Open project…", self)
+        self.act_open.triggered.connect(self.open_project_dialog)
+        self.act_save = QAction(st.standardIcon(QStyle.SP_DialogSaveButton), "Save project…", self)
+        self.act_save.setShortcut(QKeySequence.Save)
+        self.act_save.triggered.connect(self.save_project_dialog)
+        self.act_watch = QAction(st.standardIcon(QStyle.SP_FileDialogContentsView), "Watch folder…", self)
+        self.act_watch.setCheckable(True)
+        self.act_watch.setToolTip("Automatically add and scan new recordings that appear in a folder")
+        self.act_watch.triggered.connect(self.toggle_watch)
+        self.act_library = QAction(st.standardIcon(QStyle.SP_FileDialogDetailedView), "Library && stats", self)
+        self.act_library.triggered.connect(self.show_library)
         for a in (self.act_add, self.act_add_dir, self.act_remove):
             tb.addAction(a)
         tb.addSeparator()
         tb.addAction(self.act_analyze)
         tb.addAction(self.act_stop)
+        tb.addSeparator()
+        for a in (self.act_open, self.act_save, self.act_watch, self.act_library):
+            tb.addAction(a)
 
         # left: video list + settings
         self.table = QTableWidget(0, len(self.COLS))
@@ -1140,6 +1231,147 @@ class MainWindow(QMainWindow):
         else:
             self.status.setText("Highlight video failed.")
             QMessageBox.warning(self, APP_NAME, f"Building the video failed:\n{msg}")
+
+    # -- watch folder --------------------------------------------------------
+    def toggle_watch(self, on: bool) -> None:
+        if not on:
+            self.stop_watching()
+            return
+        start = self.settings.value("watch_dir", "") or os.path.expanduser("~")
+        d = QFileDialog.getExistingDirectory(self, "Watch this folder for new recordings", start)
+        if d:
+            self.start_watching(d)
+        else:
+            self.act_watch.setChecked(False)
+
+    def start_watching(self, d: str) -> None:
+        for old in self._watcher.directories():
+            self._watcher.removePath(old)
+        self._watcher.addPath(d)
+        self.watch_dir = d
+        # only recordings that appear from now on are added automatically
+        self._watch_known = {os.path.join(d, f) for f in os.listdir(d)}
+        self._watch_sizes = {}
+        self.settings.setValue("watch_dir", d)
+        self.settings.setValue("watching", "true")
+        self.act_watch.setChecked(True)
+        self.act_watch.setText(f"Watching {os.path.basename(d) or d}")
+        self.status.setText(f"Watching {d} for new recordings.")
+
+    def stop_watching(self) -> None:
+        for old in self._watcher.directories():
+            self._watcher.removePath(old)
+        self.watch_dir = None
+        self.settings.setValue("watching", "false")
+        self.act_watch.setChecked(False)
+        self.act_watch.setText("Watch folder…")
+
+    def _check_watch_folder(self) -> None:
+        d = getattr(self, "watch_dir", None)
+        if not d or not os.path.isdir(d):
+            return
+        new, pending = [], False
+        for f in sorted(os.listdir(d)):
+            p = os.path.join(d, f)
+            if p in self._watch_known or os.path.splitext(f)[1].lower() not in VIDEO_EXTS:
+                continue
+            try:
+                size = os.path.getsize(p)
+            except OSError:
+                continue
+            if self._watch_sizes.get(p) == size and size > 0:   # stopped growing: recording finished
+                self._watch_known.add(p)
+                new.append(p)
+            else:
+                self._watch_sizes[p] = size
+                pending = True
+        if pending:
+            self._watch_timer.start()
+        if new and self.add_paths(new) and not self._analyze_worker and not self._reel_worker:
+            self.start_analysis()
+
+    # -- library -------------------------------------------------------------
+    def show_library(self) -> None:
+        dlg = LibraryDialog(self, self.sp_gap.value(), self.sp_min.value())
+        dlg.open_videos.connect(lambda paths: (self.add_paths(paths), self.start_analysis()))
+        dlg.exec()
+
+    # -- projects ------------------------------------------------------------
+    def project_data(self, path: str) -> dict:
+        vids = []
+        for v in self.videos:
+            vids.append(library.project_video_entry(
+                v.path, path, selected=v.selected, trims={k: list(t) for k, t in v.trims.items()}))
+        settings = {k: self.settings.value(k) for k in (
+            "streak_min", "streak_gap", "streak_types", "show_singles", "pad_before", "pad_after", "reel_preset",
+            "music", "music_volume", "duck", "beat_sync", "overlays", "titles", "replay", "encoder")}
+        self.reel_options()   # make sure the latest UI values are in settings
+        settings = {k: self.settings.value(k) for k in settings}
+        return {"videos": vids, "order": [list(k) for k in self.reel_order], "settings": settings}
+
+    def save_project_dialog(self) -> None:
+        start = self._project_path or os.path.join(self.settings.value("reel_dir", os.path.expanduser("~")),
+                                                   "highlights" + library.PROJECT_EXT)
+        out, _ = QFileDialog.getSaveFileName(self, "Save project", start,
+                                             f"BF6 Kill Tracker project (*{library.PROJECT_EXT})")
+        if out:
+            if not out.endswith(library.PROJECT_EXT):
+                out += library.PROJECT_EXT
+            self.save_project(out)
+
+    def save_project(self, path: str) -> None:
+        library.save_project(path, self.project_data(path))
+        self._project_path = path
+        self.setWindowTitle(f"{APP_NAME} {__version__} — {os.path.basename(path)}")
+        self.status.setText(f"Saved project {path}")
+
+    def open_project_dialog(self) -> None:
+        start = os.path.dirname(self._project_path or "") or self.settings.value("reel_dir", os.path.expanduser("~"))
+        f, _ = QFileDialog.getOpenFileName(self, "Open project", start,
+                                           f"BF6 Kill Tracker project (*{library.PROJECT_EXT})")
+        if f:
+            try:
+                self.open_project(f)
+            except Exception as exc:
+                QMessageBox.warning(self, APP_NAME, f"Couldn't open the project:\n{exc}")
+
+    def open_project(self, path: str) -> None:
+        data = library.load_project(path)
+        if self._analyze_worker or self._reel_worker:
+            raise RuntimeError("Wait for the current job to finish first")
+        widgets = {"streak_min": self.sp_min, "streak_gap": self.sp_gap, "pad_before": self.sp_pre,
+                   "pad_after": self.sp_post, "music_volume": self.sp_music_vol}
+        st = data.get("settings", {})
+        for k, w in widgets.items():
+            if st.get(k) not in (None, ""):
+                w.setValue(type(w.value())(float(st[k])))
+        for k, cb in (("show_singles", self.cb_singles), ("duck", self.cb_duck), ("beat_sync", self.cb_beat),
+                      ("overlays", self.cb_overlays), ("titles", self.cb_titles), ("replay", self.cb_replay)):
+            if st.get(k) is not None:
+                cb.setChecked(str(st[k]) == "true")
+        if st.get("streak_types") is not None:
+            self.cb_types.setCurrentIndex(int(st["streak_types"]))
+        if st.get("encoder") is not None:
+            self.cb_encoder.setCurrentIndex(int(st["encoder"]))
+        if st.get("reel_preset"):
+            self.cb_preset.setCurrentText(str(st["reel_preset"]))
+        self.ed_music.setText(str(st.get("music") or ""))
+        self.videos = []
+        missing = [v["path"] for v in data["videos"] if not os.path.isfile(v["path"])]
+        self.add_paths([v["path"] for v in data["videos"] if os.path.isfile(v["path"])])
+        by_path = {v.path: v for v in self.videos}
+        for v in data["videos"]:
+            e = by_path.get(os.path.abspath(v["path"]))
+            if e:
+                e.selected = {k: bool(x) for k, x in v.get("selected", {}).items()}
+                e.trims = {k: tuple(t) for k, t in v.get("trims", {}).items()}
+        self.reel_order = [tuple(k) for k in data.get("order", [])]
+        self._project_path = path
+        self.setWindowTitle(f"{APP_NAME} {__version__} — {os.path.basename(path)}")
+        self._rebuild_tree()
+        if missing:
+            QMessageBox.information(self, APP_NAME, "These videos weren't found:\n" + "\n".join(missing))
+        self.start_analysis()      # remembered scans load instantly
 
     # -- plumbing ----------------------------------------------------------
     def _run_in_thread(self, worker: "Worker", wire) -> None:
