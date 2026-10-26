@@ -96,3 +96,52 @@ def test_add_scan_and_build(app, video, tmp_path):
     assert os.path.isfile(out)
     assert abs(probe(out).duration - (15 + 2 - (12 - 3))) < 0.3   # 9..17 s of the source
     w.close()
+
+
+def test_trim_reorder_types_and_options(app, video, tmp_path):
+    from PySide6.QtCore import QSettings, Qt
+    w = MainWindow(QSettings(str(tmp_path / "s.ini"), QSettings.IniFormat))
+    w.cb_open.setChecked(False)
+    w.add_paths([video])
+    kills = [KillEvent(2, types=["headshot"]), KillEvent(3, types=["gun"]), KillEvent(4, types=["headshot"]),
+             KillEvent(12, types=["explosive"]), KillEvent(13, count=2, types=["explosive", "explosive"])]
+    res = AnalysisResult(video, 20.0, 30.0, kills, [], 0, 0.0, 10.0, deaths=[8.0], feed_used=True)
+    w.videos[0].result, w.videos[0].status = res, "Done"
+    w._regroup_all()
+    top = w.tree.topLevelItem(0)
+    assert top.childCount() == 2 and "1 death(s)" in top.text(2)
+    assert w.table.item(0, 4).text() == "1" and w.table.item(0, 5).text() == "6.0"
+    assert top.child(0).text(2) == "2 HS, 1 gun"
+
+    # streak rule by kill type: explosives only -> just the second streak
+    w.cb_types.setCurrentIndex(3)
+    assert w.tree.topLevelItem(0).childCount() == 1
+    w.cb_types.setCurrentIndex(0)
+
+    # reorder: move the first clip down
+    assert [k[1] for k in w.reel_order] == ["s2.000", "s12.000"]
+    w.order_list.setCurrentRow(0)
+    w._move_clip(1)
+    segs = w._segments()
+    assert [round(g.start) for g in segs] == [9, 0]      # 12-3 first, then 2-3 (clamped to 0)
+
+    # trim the 2-4 s streak to exactly 1.0-6.0 s
+    top = w.tree.topLevelItem(0)
+    w.tree.setCurrentItem(top.child(0))
+    w._set_trim(1.0, 6.0)
+    assert w.videos[0].trims["s2.000"] == (1.0, 6.0)
+    seg = next(g for g in w._segments() if g.start < 5)
+    assert (seg.start, seg.end) == (1.0, 6.0)
+    w._set_trim(3.0, 3.5)                                   # can't cut kills off
+    assert w.videos[0].trims["s2.000"] == (2.0, 4.2)
+    w._reset_trim()
+    assert "s2.000" not in w.videos[0].trims
+
+    # reel options from the UI
+    w.cb_preset.setCurrentText("Vertical 9:16 (TikTok / Shorts / Reels)")
+    w.cb_overlays.setChecked(True)
+    w.cb_replay.setChecked(True)
+    o = w.reel_options()
+    assert o.vertical and o.size == (1080, 1920) and o.overlays and o.replay and not w.cb_res.isEnabled()
+    w.preview.shutdown()
+    w.close()

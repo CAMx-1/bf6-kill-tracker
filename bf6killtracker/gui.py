@@ -17,7 +17,8 @@ from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QScrollArea, QSpinBox, QSplitter, QStatusBar, QStyle, QTableWidget, QTableWidgetItem, QToolBar,
+    QLineEdit, QListWidget, QListWidgetItem, QScrollArea, QSpinBox, QSplitter, QStatusBar, QStyle,
+    QTabWidget, QTableWidget, QTableWidgetItem, QToolBar,
     QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -25,7 +26,7 @@ from . import __version__
 from .analyzer import AnalysisResult, Cancelled, analyze
 from .cli import VIDEO_EXTS, fmt_time
 from .events import KillEvent, Streak, find_streaks
-from .reel import ReelCancelled, Segment, build_reel, plan_segments
+from .reel import PRESETS, ReelCancelled, ReelOptions, Segment, apply_preset, build_reel, plan_segments
 from .preview import PreviewPlayer
 from .video import cut_clip, find_ffmpeg, grab_frame, probe
 
@@ -54,6 +55,15 @@ class Clip:
     events: List[KillEvent]
     title: str
 
+    def types_text(self) -> str:
+        tc: Dict[str, int] = {}
+        for k in self.events:
+            for t in k.type_list():
+                if t != "unknown":
+                    tc[t] = tc.get(t, 0) + 1
+        short = {"headshot": "HS", "explosive": "expl.", "gun": "gun", "other": "other"}
+        return ", ".join(f"{n} {short.get(t, t)}" for t, n in sorted(tc.items(), key=lambda x: -x[1]))
+
     @property
     def span(self) -> str:
         d = self.end - self.start
@@ -75,6 +85,8 @@ class VideoEntry:
     error: str = ""
     # clip key -> ticked for the highlight video
     selected: Dict[str, bool] = field(default_factory=dict)
+    # clip key -> (start, end) in the source video, set by trimming in the preview
+    trims: Dict[str, tuple] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -160,9 +172,9 @@ class ReelWorker(Worker):
     done = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, segments: List[Segment], out_path: str, size, fps):
+    def __init__(self, segments: List[Segment], out_path: str, options: ReelOptions):
         super().__init__()
-        self.segments, self.out_path, self.size, self.fps = segments, out_path, size, fps
+        self.segments, self.out_path, self.options = segments, out_path, options
         self._cancel = False
 
     def cancel(self) -> None:
@@ -170,7 +182,7 @@ class ReelWorker(Worker):
 
     def run(self) -> None:
         try:
-            build_reel(self.segments, self.out_path, size=self.size, fps=self.fps,
+            build_reel(self.segments, self.out_path, options=self.options,
                        progress=lambda f, m: self.progress.emit(f, m), should_cancel=lambda: self._cancel)
             self.done.emit(self.out_path)
         except ReelCancelled:
@@ -208,7 +220,7 @@ class ThumbWorker(Worker):
 # main window
 # ----------------------------------------------------------------------------
 class MainWindow(QMainWindow):
-    COLS = ["Video", "Length", "Status", "Kills", "Streaks"]
+    COLS = ["Video", "Length", "Status", "Kills", "Deaths", "K/D", "Streaks"]
 
     def __init__(self, settings: Optional[QSettings] = None):
         super().__init__()
@@ -283,6 +295,15 @@ class MainWindow(QMainWindow):
         self.cb_singles.setChecked(self.settings.value("show_singles", "false") == "true")
         self.cb_singles.toggled.connect(self._on_singles_toggled)
         form.addRow("", self.cb_singles)
+        self.cb_types = QComboBox()
+        self._type_filters = [("All kills", None), ("Headshots only", ["headshot"]),
+                              ("Gun kills (incl. headshots)", ["gun", "headshot"]), ("Explosive kills", ["explosive"])]
+        self.cb_types.addItems([n for n, _ in self._type_filters])
+        self.cb_types.setCurrentIndex(int(self.settings.value("streak_types", 0)))
+        self.cb_types.setToolTip("Which kills count toward a streak (kill types come from the kill feed). "
+                                 "A death always ends a streak.")
+        self.cb_types.currentIndexChanged.connect(self._regroup_all)
+        form.addRow("Count", self.cb_types)
         self.sp_min.valueChanged.connect(self._regroup_all)
         self.sp_gap.valueChanged.connect(self._regroup_all)
 
@@ -297,10 +318,10 @@ class MainWindow(QMainWindow):
 
         # right: streak tree + thumbnails + reel
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Clip", "Kills", "Time", "Length"])
+        self.tree.setHeaderLabels(["Clip", "Kills", "Types", "Time", "Length"])
         self.tree.setRootIsDecorated(True)
         self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
-        for c in (1, 2, 3):
+        for c in (1, 2, 3, 4):
             self.tree.header().setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.tree.itemChanged.connect(self._on_tree_check)
         self.tree.currentItemChanged.connect(self._on_clip_selected)
@@ -331,8 +352,59 @@ class MainWindow(QMainWindow):
         thumbs.setMinimumWidth(200)
         self.thumb_title = QLabel("Select a streak to preview it")
         prev_row = QHBoxLayout()
-        prev_row.addWidget(self.preview)
+        pv = QVBoxLayout()
+        pv.addWidget(self.preview)
+        trim = QHBoxLayout()
+        self.sp_trim_a = QDoubleSpinBox()
+        self.sp_trim_b = QDoubleSpinBox()
+        for sp in (self.sp_trim_a, self.sp_trim_b):
+            sp.setDecimals(1)
+            sp.setSingleStep(0.5)
+            sp.setSuffix(" s")
+            sp.setRange(0, 1e6)
+            sp.setKeyboardTracking(False)
+            sp.valueChanged.connect(self._on_trim_spin)
+        b_in = QPushButton("[ Start here")
+        b_in.setToolTip("Clip starts at the preview's current position")
+        b_in.clicked.connect(lambda: self._trim_at_playhead(True))
+        b_out = QPushButton("End here ]")
+        b_out.setToolTip("Clip ends at the preview's current position")
+        b_out.clicked.connect(lambda: self._trim_at_playhead(False))
+        self.btn_untrim = QPushButton("Reset")
+        self.btn_untrim.setToolTip("Use the lead-in/tail settings again")
+        self.btn_untrim.clicked.connect(self._reset_trim)
+        trim.addWidget(QLabel("Clip"))
+        trim.addWidget(self.sp_trim_a)
+        trim.addWidget(QLabel("to"))
+        trim.addWidget(self.sp_trim_b)
+        trim.addWidget(b_in)
+        trim.addWidget(b_out)
+        trim.addWidget(self.btn_untrim)
+        self.trim_box = QWidget()
+        self.trim_box.setLayout(trim)
+        self.trim_box.setEnabled(False)
+        pv.addWidget(self.trim_box)
+        prev_row.addLayout(pv)
         prev_row.addWidget(thumbs, 1)
+
+        # clip order for the highlight video (drag to reorder)
+        self.order_list = QListWidget()
+        self.order_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.order_list.model().rowsMoved.connect(self._on_order_moved)
+        order_btns = QHBoxLayout()
+        for text, fn in (("Move up", lambda: self._move_clip(-1)), ("Move down", lambda: self._move_clip(1)),
+                         ("Time order", lambda: self._sort_order("time")),
+                         ("Best streak last", lambda: self._sort_order("best_last"))):
+            b = QPushButton(text)
+            b.clicked.connect(fn)
+            order_btns.addWidget(b)
+        order_btns.addStretch(1)
+        order_tab = QWidget()
+        ol = QVBoxLayout(order_tab)
+        ol.addWidget(QLabel("Order of the clips in the highlight video (drag to reorder):"))
+        ol.addWidget(self.order_list, 1)
+        ol.addLayout(order_btns)
+        self.reel_order: List[tuple] = []     # (video path, clip key)
 
         reel = QGroupBox("Highlight reel")
         rf = QFormLayout(reel)
@@ -346,27 +418,77 @@ class MainWindow(QMainWindow):
         self.sp_post.setSingleStep(0.5)
         self.sp_post.setValue(float(self.settings.value("pad_after", 2.0)))
         self.sp_post.setSuffix(" s after last kill")
+        self.cb_preset = QComboBox()
+        self.cb_preset.addItems(list(PRESETS))
+        self.cb_preset.setCurrentText(str(self.settings.value("reel_preset", "Custom")))
         self.cb_res = QComboBox()
         self.cb_res.addItems(["Same as first video", "1080p (1920×1080)", "1440p (2560×1440)", "720p (1280×720)"])
         self.cb_fps = QComboBox()
         self.cb_fps.addItems(["Same as first video", "60 fps", "30 fps"])
+        self.cb_preset.currentTextChanged.connect(self._on_preset)
+        music_row = QHBoxLayout()
+        self.ed_music = QLineEdit(str(self.settings.value("music", "")))
+        self.ed_music.setPlaceholderText("No music")
+        self.ed_music.setReadOnly(True)
+        b_music = QPushButton("Choose…")
+        b_music.clicked.connect(self._choose_music)
+        b_nomusic = QPushButton("✕")
+        b_nomusic.setFixedWidth(30)
+        b_nomusic.setToolTip("No music")
+        b_nomusic.clicked.connect(lambda: self.ed_music.setText(""))
+        music_row.addWidget(self.ed_music, 1)
+        music_row.addWidget(b_music)
+        music_row.addWidget(b_nomusic)
+        self.sp_music_vol = QSpinBox()
+        self.sp_music_vol.setRange(0, 200)
+        self.sp_music_vol.setValue(int(self.settings.value("music_volume", 80)))
+        self.sp_music_vol.setSuffix(" % music volume")
+        self.cb_duck = QCheckBox("Lower music when the game is loud")
+        self.cb_duck.setChecked(self.settings.value("duck", "true") == "true")
+        self.cb_beat = QCheckBox("Cut on the beat")
+        self.cb_beat.setChecked(self.settings.value("beat_sync", "false") == "true")
+        self.cb_overlays = QCheckBox("Kill call-outs (DOUBLE KILL, streak count)")
+        self.cb_overlays.setChecked(self.settings.value("overlays", "false") == "true")
+        self.cb_titles = QCheckBox("Video name at the start of each clip")
+        self.cb_titles.setChecked(self.settings.value("titles", "false") == "true")
+        self.cb_replay = QCheckBox("Slow-motion replay of the best kill in each clip")
+        self.cb_replay.setChecked(self.settings.value("replay", "false") == "true")
+        self.cb_encoder = QComboBox()
+        self._encoders = [("Automatic (GPU when available)", "auto"), ("CPU (x264)", "libx264"),
+                          ("NVIDIA (NVENC)", "h264_nvenc"), ("Intel (Quick Sync)", "h264_qsv"),
+                          ("AMD (AMF)", "h264_amf")]
+        self.cb_encoder.addItems([n for n, _ in self._encoders])
+        self.cb_encoder.setCurrentIndex(int(self.settings.value("encoder", 0)))
         self.cb_open = QCheckBox("Open the video when it’s done")
         self.cb_open.setChecked(self.settings.value("open_after", "true") == "true")
         self.lbl_reel = QLabel("Nothing selected")
+        self.lbl_reel.setWordWrap(True)
         self.btn_reel = QPushButton(self.style().standardIcon(QStyle.SP_DialogSaveButton), "Build highlight video…")
         self.btn_reel.setMinimumHeight(34)
         self.btn_reel.clicked.connect(self.build_reel_dialog)
         rf.addRow("Lead-in", self.sp_pre)
         rf.addRow("Tail", self.sp_post)
+        rf.addRow("Export", self.cb_preset)
         rf.addRow("Resolution", self.cb_res)
         rf.addRow("Frame rate", self.cb_fps)
+        rf.addRow("Music", music_row)
+        rf.addRow("", self.sp_music_vol)
+        rf.addRow("", self.cb_duck)
+        rf.addRow("", self.cb_beat)
+        rf.addRow("Extras", self.cb_overlays)
+        rf.addRow("", self.cb_titles)
+        rf.addRow("", self.cb_replay)
+        rf.addRow("Encoder", self.cb_encoder)
         rf.addRow("", self.cb_open)
-        rf.addRow(self.lbl_reel)
-        rf.addRow(self.btn_reel)
         self.sp_pre.valueChanged.connect(self._update_reel_summary)
         self.sp_post.valueChanged.connect(self._update_reel_summary)
+        self._on_preset(self.cb_preset.currentText())
 
         self._left_layout.addWidget(reel)
+        left_scroll = QScrollArea()
+        left_scroll.setWidget(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QScrollArea.NoFrame)
 
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -374,11 +496,23 @@ class MainWindow(QMainWindow):
         rv.addWidget(QLabel("<b>Kill streaks</b>  (ticked clips go into the highlight video)"))
         rv.addWidget(self.tree, 1)
         rv.addLayout(sel_row)
-        rv.addWidget(self.thumb_title)
-        rv.addLayout(prev_row)
+        prev_tab = QWidget()
+        ptl = QVBoxLayout(prev_tab)
+        ptl.addWidget(self.thumb_title)
+        ptl.addLayout(prev_row)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(prev_tab, "Preview && trim")
+        self.tabs.addTab(order_tab, "Clip order")
+        rv.addWidget(self.tabs)
 
         split = QSplitter()
-        split.addWidget(left)
+        left_wrap = QWidget()
+        lw = QVBoxLayout(left_wrap)
+        lw.setContentsMargins(0, 0, 0, 0)
+        lw.addWidget(left_scroll, 1)
+        lw.addWidget(self.lbl_reel)
+        lw.addWidget(self.btn_reel)
+        split.addWidget(left_wrap)
         split.addWidget(right)
         split.setSizes([500, 820])
         central = QWidget()
@@ -463,9 +597,12 @@ class MainWindow(QMainWindow):
         status = v.status
         if v.status == "Scanning":
             status = f"Scanning {v.progress * 100:.0f}%"
-        kills = str(v.result.total_kills) if v.result else ""
-        streaks = str(len(v.streaks)) if v.result else ""
-        return [v.name, fmt_time(v.duration) if v.duration else "?", status, kills, streaks]
+        r = v.result
+        kills = str(r.total_kills) if r else ""
+        deaths = (str(len(r.deaths)) if r.feed_used else "–") if r else ""
+        kd = (f"{r.kd:.1f}" if r.feed_used else "–") if r else ""
+        streaks = str(len(v.streaks)) if r else ""
+        return [v.name, fmt_time(v.duration) if v.duration else "?", status, kills, deaths, kd, streaks]
 
     def _rebuild_table(self) -> None:
         self.table.setRowCount(len(self.videos))
@@ -494,7 +631,9 @@ class MainWindow(QMainWindow):
 
     def _regroup(self, v: VideoEntry) -> None:
         if v.result:
-            v.streaks = find_streaks(v.result.kills, self.sp_gap.value(), self.sp_min.value())
+            only = self._type_filters[self.cb_types.currentIndex()][1]
+            v.streaks = find_streaks(v.result.kills, self.sp_gap.value(), self.sp_min.value(),
+                                     v.result.deaths, only)
 
     def _show_singles(self) -> bool:
         return self.cb_singles.isChecked()
@@ -506,6 +645,7 @@ class MainWindow(QMainWindow):
     def _regroup_all(self) -> None:
         self.settings.setValue("streak_min", self.sp_min.value())
         self.settings.setValue("streak_gap", self.sp_gap.value())
+        self.settings.setValue("streak_types", self.cb_types.currentIndex())
         for v in self.videos:
             self._regroup(v)
         self._rebuild_table()
@@ -521,7 +661,9 @@ class MainWindow(QMainWindow):
             if not v.result:
                 continue
             clips = v.clips(self._show_singles())
-            top = QTreeWidgetItem([v.name, str(sum(c.kills for c in clips)), "", ""])
+            r = v.result
+            summary = f"{len(r.deaths)} death(s), K/D {r.kd:.1f}, best life {r.best_life}" if r.feed_used else ""
+            top = QTreeWidgetItem([v.name, str(sum(c.kills for c in clips)), summary, "", ""])
             top.setData(0, Qt.UserRole, (vi, None))
             top.setFlags(top.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
             f = top.font(0)
@@ -531,7 +673,8 @@ class MainWindow(QMainWindow):
                 top.setText(0, f"{v.name}  — no streaks ({v.result.total_kills} kills)")
             self.tree.addTopLevelItem(top)
             for c in clips:
-                child = QTreeWidgetItem([c.title, str(c.kills),
+                trimmed = "  ✂" if c.key in v.trims else ""
+                child = QTreeWidgetItem([c.title + trimmed, str(c.kills), c.types_text(),
                                          fmt_time(c.start) if c.kind == "kill" else
                                          f"{fmt_time(c.start)} – {fmt_time(c.end)}", c.span])
                 child.setData(0, Qt.UserRole, (vi, c.key))
@@ -604,6 +747,7 @@ class MainWindow(QMainWindow):
         if not c:
             self.thumb_title.setText("Select a streak to preview it")
             self.preview.clear()
+            self.trim_box.setEnabled(False)
             return
         span = f" in {c.span}" if c.kind == "streak" and c.span not in ("", "at once") else (
             " at once" if c.span == "at once" else "")
@@ -612,6 +756,7 @@ class MainWindow(QMainWindow):
                                  f"(preview has no sound; “Open in video player” for full quality)")
         seg = self._segments(only=(v, c))[0]
         self.preview.load(v.path, seg.start, seg.end, autoplay=True)
+        self._show_trim(v, c)
         self._thumb_req += 1
         self._thumb_slots: Dict[float, QLabel] = {}
         for k in c.events:
@@ -724,13 +869,172 @@ class MainWindow(QMainWindow):
     def _selected_clips(self):
         return [(v, c) for v in self.videos for c in v.clips(self._show_singles()) if v.is_selected(c)]
 
+    def _item(self, v: VideoEntry, c: Clip):
+        """plan_segments item for a clip; trimmed clips use their exact range."""
+        pre, post = self.sp_pre.value(), self.sp_post.value()
+        if c.key in v.trims:
+            a, b = v.trims[c.key]
+            start, end = a + pre, b - post        # plan_segments adds the padding back
+        else:
+            start, end = c.start, c.end
+        kills = [(k.time, k.count) for k in c.events]
+        title = os.path.splitext(v.name)[0]
+        return (v.path, start, end, f"{v.name} {c.title.lower()} ({c.kills} kills)", kills, title)
+
+    def _ordered_selection(self):
+        sel = {(v.path, c.key): (v, c) for v, c in self._selected_clips()}
+        self._sync_order(sel)
+        return [sel[k] for k in self.reel_order if k in sel]
+
     def _segments(self, only=None) -> List[Segment]:
-        pairs = [only] if only is not None else self._selected_clips()
-        items = [(v.path, c.start, c.end, f"{v.name} {c.title.lower()} ({c.kills} kills)") for v, c in pairs]
-        return plan_segments(items, {v.path: v.duration for v in self.videos},
-                             self.sp_pre.value(), self.sp_post.value(), order=[v.path for v in self.videos])
+        pairs = [only] if only is not None else self._ordered_selection()
+        return plan_segments([self._item(v, c) for v, c in pairs], {v.path: v.duration for v in self.videos},
+                             self.sp_pre.value(), self.sp_post.value(), keep_order=True)
+
+    # -- clip order ----------------------------------------------------------
+    def _sync_order(self, sel=None) -> None:
+        if sel is None:
+            sel = {(v.path, c.key): (v, c) for v, c in self._selected_clips()}
+        rank = {v.path: i for i, v in enumerate(self.videos)}
+        def natural(k):
+            return (rank.get(k[0], 0), sel[k][1].start)
+
+        order = [k for k in self.reel_order if k in sel]
+        # clips that (re)appear go to their time position, without disturbing a custom order
+        for k in sorted((k for k in sel if k not in order), key=natural):
+            i = next((n for n, o in enumerate(order) if natural(o) > natural(k)), len(order))
+            order.insert(i, k)
+        self.reel_order = order
+
+    def _refresh_order_list(self) -> None:
+        sel = {(v.path, c.key): (v, c) for v, c in self._selected_clips()}
+        self._sync_order(sel)
+        self.order_list.blockSignals(True)
+        cur = self.order_list.currentRow()
+        self.order_list.clear()
+        for n, k in enumerate(self.reel_order):
+            v, c = sel[k]
+            it = QListWidgetItem(f"{n + 1}.  {v.name} — {c.title} ({c.kills} kills, {fmt_time(c.start)})")
+            it.setData(Qt.UserRole, k)
+            self.order_list.addItem(it)
+        if 0 <= cur < self.order_list.count():
+            self.order_list.setCurrentRow(cur)
+        self.order_list.blockSignals(False)
+
+    def _on_order_moved(self, *_):
+        self.reel_order = [self.order_list.item(i).data(Qt.UserRole) for i in range(self.order_list.count())]
+        self._refresh_order_list()
+        self._update_reel_summary()
+
+    def _move_clip(self, d: int) -> None:
+        i = self.order_list.currentRow()
+        j = i + d
+        if i < 0 or not 0 <= j < len(self.reel_order):
+            return
+        self.reel_order[i], self.reel_order[j] = self.reel_order[j], self.reel_order[i]
+        self._refresh_order_list()
+        self.order_list.setCurrentRow(j)
+        self._update_reel_summary()
+
+    def _sort_order(self, how: str) -> None:
+        sel = {(v.path, c.key): (v, c) for v, c in self._selected_clips()}
+        rank = {v.path: i for i, v in enumerate(self.videos)}
+        if how == "time":
+            self.reel_order = sorted(sel, key=lambda k: (rank.get(k[0], 0), sel[k][1].start))
+        else:   # build up to the best one: fewest kills first
+            self.reel_order = sorted(sel, key=lambda k: (sel[k][1].kills, rank.get(k[0], 0), sel[k][1].start))
+        self._refresh_order_list()
+        self._update_reel_summary()
+
+    # -- trimming ------------------------------------------------------------
+    def _effective_range(self, v: VideoEntry, c: Clip):
+        seg = self._segments(only=(v, c))
+        return (seg[0].start, seg[0].end) if seg else (c.start, c.end)
+
+    def _show_trim(self, v: VideoEntry, c: Clip) -> None:
+        a, b = self._effective_range(v, c)
+        for sp, val in ((self.sp_trim_a, a), (self.sp_trim_b, b)):
+            sp.blockSignals(True)
+            sp.setRange(0, v.duration or 1e6)
+            sp.setValue(val)
+            sp.blockSignals(False)
+        self.btn_untrim.setEnabled(c.key in v.trims)
+        self.trim_box.setEnabled(True)
+
+    def _set_trim(self, a: float, b: float) -> None:
+        v, c = self._current_clip()
+        if not c:
+            return
+        a = max(0.0, min(a, c.start))            # keep every kill of the clip inside it
+        b = max(b, c.end + 0.2)
+        if v.duration:
+            b = min(b, v.duration)
+        v.trims[c.key] = (round(a, 2), round(b, 2))
+        self._show_trim(v, c)
+        self.preview.load(v.path, a, b, autoplay=False)
+        self._mark_tree_item(v, c)
+        self._update_reel_summary()
+
+    def _mark_tree_item(self, v: VideoEntry, c: Clip) -> None:
+        it = self.tree.currentItem()
+        if it is not None:
+            self.tree.blockSignals(True)
+            it.setText(0, c.title + ("  ✂" if c.key in v.trims else ""))
+            self.tree.blockSignals(False)
+
+    def _on_trim_spin(self, *_):
+        self._set_trim(self.sp_trim_a.value(), self.sp_trim_b.value())
+
+    def _trim_at_playhead(self, start: bool) -> None:
+        v, c = self._current_clip()
+        if not c or not self.preview.path:
+            return
+        t = self.preview.start + self.preview.pos
+        a, b = self._effective_range(v, c)
+        self._set_trim(t, b) if start else self._set_trim(a, t)
+
+    def _reset_trim(self) -> None:
+        v, c = self._current_clip()
+        if c and v.trims.pop(c.key, None) is not None:
+            self._show_trim(v, c)
+            a, b = self._effective_range(v, c)
+            self.preview.load(v.path, a, b, autoplay=False)
+            self._mark_tree_item(v, c)
+            self._update_reel_summary()
+
+    # -- reel options -------------------------------------------------------
+    def _on_preset(self, name: str) -> None:
+        custom = name == "Custom"
+        self.cb_res.setEnabled(custom)
+        self.cb_fps.setEnabled(custom)
+        self.settings.setValue("reel_preset", name)
+
+    def _choose_music(self) -> None:
+        start = os.path.dirname(self.ed_music.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Choose music", start,
+                                           "Audio (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;All files (*)")
+        if f:
+            self.ed_music.setText(f)
+
+    def reel_options(self) -> ReelOptions:
+        name = self.cb_preset.currentText()
+        o = apply_preset(name)
+        if name == "Custom":
+            o.size, o.fps = self._reel_size(), self._reel_fps()
+        o.music = self.ed_music.text() or None
+        o.music_volume = self.sp_music_vol.value() / 100
+        o.duck, o.beat_sync = self.cb_duck.isChecked(), self.cb_beat.isChecked()
+        o.overlays, o.titles, o.replay = self.cb_overlays.isChecked(), self.cb_titles.isChecked(), \
+            self.cb_replay.isChecked()
+        o.encoder = self._encoders[self.cb_encoder.currentIndex()][1]
+        for key, val in (("music", self.ed_music.text()), ("music_volume", self.sp_music_vol.value()),
+                         ("duck", o.duck), ("beat_sync", o.beat_sync), ("overlays", o.overlays),
+                         ("titles", o.titles), ("replay", o.replay), ("encoder", self.cb_encoder.currentIndex())):
+            self.settings.setValue(key, ("true" if val else "false") if isinstance(val, bool) else val)
+        return o
 
     def _update_reel_summary(self) -> None:
+        self._refresh_order_list()
         self.settings.setValue("pad_before", self.sp_pre.value())
         self.settings.setValue("pad_after", self.sp_post.value())
         sel = self._selected_clips()
@@ -781,17 +1085,21 @@ class MainWindow(QMainWindow):
             return
         start = os.path.join(self.settings.value("reel_dir", os.path.dirname(self.videos[0].path)),
                              "kill-streaks.mp4")
-        out, _ = QFileDialog.getSaveFileName(self, "Save highlight video", start, "MP4 video (*.mp4)")
+        gif = self.cb_preset.currentText().startswith("GIF")
+        ext = ".gif" if gif else ".mp4"
+        start = os.path.splitext(start)[0] + ext
+        out, _ = QFileDialog.getSaveFileName(self, "Save highlight video", start,
+                                             "GIF (*.gif)" if gif else "MP4 video (*.mp4)")
         if not out:
             return
-        if not out.lower().endswith(".mp4"):
-            out += ".mp4"
+        if not out.lower().endswith(ext):
+            out += ext
         self.settings.setValue("reel_dir", os.path.dirname(out))
         self.start_reel(out)
 
     def start_reel(self, out: str) -> None:
         segs = self._segments()
-        w = ReelWorker(segs, out, self._reel_size(), self._reel_fps())
+        w = ReelWorker(segs, out, self.reel_options())
         self._reel_worker = w
         self._reel_started = time.time()
 
