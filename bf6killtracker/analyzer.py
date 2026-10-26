@@ -40,6 +40,13 @@ class AnalysisResult:
     hud: str = ""            # how the HUD layout was chosen (auto-calibration summary)
     from_cache: bool = False  # loaded from a remembered scan instead of scanning
     events: List["HudEvent"] = field(default_factory=list)   # medals, spots, revives, squad wipes...
+    down: List["DownPeriod"] = field(default_factory=list)   # "MAN DOWN" screens (time spent down)
+    scoreboards: List["Scoreboard"] = field(default_factory=list)  # your row each time the scoreboard showed
+
+    def players(self):
+        """Other players grouped by name (from the kill feed): who you killed / who killed you."""
+        from .names import group_players
+        return group_players(self.feed)
 
     def event_counts(self) -> dict:
         from .labels import summarize
@@ -82,6 +89,8 @@ class AnalysisResult:
             "lives": [lf.to_dict() for lf in self.lives],
             "most_kills_in_one_life": self.best_life,
             "events": [e.to_dict() for e in self.events],
+            "down": [d.to_dict() for d in self.down],
+            "scoreboards": [b.to_dict() for b in self.scoreboards],
             "event_counts": self.event_counts(),
             "hud": self.hud,
             "processing_s": round(self.processing_s, 1),
@@ -101,16 +110,17 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
             config: Optional[TrackerConfig] = None, streak_gap: float = 5.0, streak_min: int = 3,
             window: float = 10.0, progress: Optional[Callable[[float], None]] = None,
             use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True,
-            use_cache: bool = False, use_labels: bool = True, label_fps: float = 5.0) -> AnalysisResult:
+            use_cache: bool = False, use_labels: bool = True, label_fps: float = 5.0,
+            use_screens: bool = True, screen_fps: float = 2.0, refresh: bool = False) -> AnalysisResult:
     """Scan ``path`` for kills, deaths and streaks.
 
     With ``use_cache`` a previous scan of the unchanged file (same detection
     options) is reused, and only the streak grouping is recomputed.
     """
     started = time.time()
-    cache_opts = {"sample_fps": sample_fps, "feed": use_feed, "labels": use_labels, "auto_calibrate": auto_calibrate,
+    cache_opts = {"sample_fps": sample_fps, "feed": use_feed, "labels": use_labels, "screens": use_screens, "auto_calibrate": auto_calibrate,
                   "layout": None if layout is None else repr(layout), "config": repr(config or TrackerConfig())}
-    if use_cache:
+    if use_cache and not refresh:
         from . import cache
         hit = cache.load(path, cache_opts)
         if hit is not None:
@@ -122,6 +132,7 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
                                split_lives(kills, deaths, hit["duration"]), hit["feed_used"], hit.get("hud", ""))
             r.from_cache = True
             r.events = hit.get("events", [])
+            r.down, r.scoreboards = hit.get("down", []), hit.get("scoreboards", [])
             return r
     info = probe(path)
     fps = sample_fps or info.fps
@@ -158,12 +169,23 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
         rois += [lreader.rois[n] for n in lnames]
     lev = max(1, int(round(fps / label_fps)))
     li = 1 + (1 if reader else 0)
+    sreader = stracker = None
+    si = len(rois)
+    if use_screens:
+        from .screens import ScreenReader, ScreenTracker
+        sreader, stracker = ScreenReader(det.layout.ref_size[0]), ScreenTracker()
+        rois += [sreader.down_roi] + sreader.header_strips
+    sev = max(1, int(round(fps / screen_fps)))
 
     def work(i: int, crops):
         obs = det.observe(crops[0])
         rows = reader.read(crops[1]) if reader is not None and i % every == 0 else None
-        labs = lreader.read(dict(zip(lnames, crops[li:]))) if lreader is not None and i % lev == 0 else None
-        return obs, rows, labs
+        labs = lreader.read(dict(zip(lnames, crops[li:li + len(lnames)]))) \
+            if lreader is not None and i % lev == 0 else None
+        scr = None
+        if sreader is not None and i % sev == 0:
+            scr = (sreader.is_down(crops[si]), sreader.board_showing(crops[si + 1:si + 3]))
+        return obs, rows, labs, scr
 
     # OpenCV releases the GIL, so frames are processed in parallel while ffmpeg decodes;
     # results are consumed strictly in order
@@ -173,7 +195,10 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
         def drain(limit: int) -> None:
             while len(pending) > limit:
                 t, fut = pending.popleft()
-                obs, rows, labs = fut.result()
+                obs, rows, labs, scr = fut.result()
+                if scr is not None:
+                    stracker.update_down(t, scr[0])
+                    stracker.update_showing(t, scr[1])
                 tracker.update(t, obs)
                 if rows is not None:
                     ft.update(t, rows)
@@ -191,6 +216,9 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
     kills = tracker.finish()
     deaths = [e.time for e in feed_events if e.kind == "death"]
     if use_feed:
+        for e in feed_events:
+            if e.kind == "kill":
+                e.counted = False
         kills = fuse_feed(kills, [e for e in feed_events if e.kind == "kill"])
     streaks = find_streaks(kills, streak_gap, streak_min, deaths)
     best, best_t = max_kills_in_window(kills, window)
@@ -203,6 +231,26 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
                             split_lives(kills, deaths, info.duration), use_feed,
                             calibration.describe() if calibration else "manual HUD layout")
     result.events = hud_events
+    if stracker is not None:
+        from .video import grab_frame
+        import cv2 as _cv2
+        for a, b in stracker._views:            # read each scoreboard viewing from one full frame
+            try:
+                fr = grab_frame(path, (a + b) / 2)
+                if fr.shape[1::-1] != tuple(det.layout.ref_size):
+                    fr = _cv2.resize(fr, det.layout.ref_size, interpolation=_cv2.INTER_AREA)
+                stracker.update_board((a + b) / 2, sreader.read_frame(fr))
+            except Exception:
+                pass
+        result.down, result.scoreboards = stracker.finish()
+        # a death screen with no kill-feed death near it is a death the feed missed
+        for d in result.down:
+            if not any(abs(d.start - x) <= 4.0 for x in result.deaths):
+                result.deaths.append(d.start)
+        result.deaths.sort()
+        if len(result.deaths) != len(deaths):
+            result.streaks = find_streaks(kills, streak_gap, streak_min, result.deaths)
+            result.lives = split_lives(kills, result.deaths, info.duration)
     if use_cache:
         from . import cache
         cache.save(result, cache_opts)

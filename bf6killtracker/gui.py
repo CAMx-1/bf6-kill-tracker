@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import numpy as np
 from PySide6.QtCore import QFileSystemWatcher, QObject, QSettings, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QImage, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
@@ -459,6 +460,51 @@ class CalloutDialog(QDialog):
         return self.style_
 
 
+class PlayersDialog(QDialog):
+    """Opponents grouped by name across the loaded videos (names shown as they appeared in the kill feed)."""
+
+    def __init__(self, parent, videos: List["VideoEntry"]):
+        super().__init__(parent)
+        from .names import group_players
+        self.setWindowTitle("Players — who you kill most, who kills you")
+        self.resize(760, 520)
+        feed = []
+        for v in videos:
+            if v.result and v.result.feed_used:
+                for e in v.result.feed:
+                    feed.append((v, e))
+        players = group_players([e for _, e in feed])
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Names are matched by how they look in the kill feed. Click a row's times to jump."))
+        table = QTableWidget(len(players), 4)
+        table.setHorizontalHeaderLabels(["Player", "You killed them", "They killed you", "When"])
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        for r, p in enumerate(players):
+            if p.image is not None and p.image.size:
+                im = np.ascontiguousarray(p.image[:, :, ::-1])
+                q = QImage(im.data, im.shape[1], im.shape[0], im.strides[0], QImage.Format_RGB888).copy()
+                lbl = QLabel()
+                lbl.setPixmap(QPixmap.fromImage(q))
+                lbl.setStyleSheet("background:#181818; padding:2px;")
+                table.setCellWidget(r, 0, lbl)
+            for c, val in ((1, len(p.kills)), (2, len(p.deaths))):
+                it = QTableWidgetItem()
+                it.setData(Qt.DisplayRole, val)
+                it.setTextAlignment(Qt.AlignCenter)
+                table.setItem(r, c, it)
+            table.setItem(r, 3, QTableWidgetItem(", ".join(fmt_time(t) for t in sorted(p.kills + p.deaths))))
+            table.setRowHeight(r, max(30, (p.image.shape[0] + 6) if p.image is not None else 30))
+        table.setColumnWidth(0, 260)
+        lay.addWidget(table, 1)
+        b = QPushButton("Close")
+        b.clicked.connect(self.accept)
+        lay.addWidget(b, 0, Qt.AlignRight)
+        self.table = table
+        self.players = players
+
+
 class UpdateWorker(Worker):
     found = Signal(object)
 
@@ -599,6 +645,9 @@ class MainWindow(QMainWindow):
         self.act_markers = QAction(st.standardIcon(QStyle.SP_FileDialogListView), "Export markers…", self)
         self.act_markers.setToolTip("Write kill/streak markers for Premiere, Resolve, Final Cut, or YouTube chapters")
         self.act_markers.triggered.connect(self.export_markers_dialog)
+        self.act_players = QAction(st.standardIcon(QStyle.SP_DirHomeIcon), "Players", self)
+        self.act_players.setToolTip("Opponents you killed most / who killed you, from the kill feed")
+        self.act_players.triggered.connect(lambda: PlayersDialog(self, self.videos).exec())
         self.act_library = QAction(st.standardIcon(QStyle.SP_FileDialogDetailedView), "Library && stats", self)
         self.act_library.triggered.connect(self.show_library)
         for a in (self.act_add, self.act_add_dir, self.act_remove):
@@ -607,7 +656,7 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_analyze)
         tb.addAction(self.act_stop)
         tb.addSeparator()
-        for a in (self.act_open, self.act_save, self.act_markers, self.act_watch, self.act_library):
+        for a in (self.act_open, self.act_save, self.act_markers, self.act_watch, self.act_players, self.act_library):
             tb.addAction(a)
 
         # left: video list + settings

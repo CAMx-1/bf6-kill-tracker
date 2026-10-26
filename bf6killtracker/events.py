@@ -310,6 +310,7 @@ def fuse_feed(kills: List[KillEvent], feed_kills: Sequence["object"], before: fl
         k.types, k.weapons = [], []
         for _, i in cands[:k.count]:
             used[i] = True
+            feed[i].counted = True
             k.types.append(feed[i].category)
             k.weapons.append(feed[i].weapon)
     out = list(kills)
@@ -321,6 +322,7 @@ def fuse_feed(kills: List[KillEvent], feed_kills: Sequence["object"], before: fl
         if any(abs(f.time - k.time) <= absorb for k in kills) or any(abs(f.time - a) <= 1.0 for a in added):
             continue
         added.append(f.time)
+        f.counted = True
         out.append(KillEvent(round(f.time, 3), 1, "feed", -1, [f.category], [f.weapon]))
     out.sort(key=lambda e: e.time)
     return out

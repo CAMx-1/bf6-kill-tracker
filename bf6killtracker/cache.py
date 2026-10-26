@@ -23,7 +23,34 @@ from .events import KillEvent, Life
 from .killfeed import FeedEvent
 
 # bump whenever detection logic changes in a way that changes results
-DETECTOR_VERSION = 4
+DETECTOR_VERSION = 6
+
+
+def _enc_sig(v) -> Optional[list]:
+    return None if v is None else [round(float(x), 4) for x in v]
+
+
+def _dec_sig(v):
+    import numpy as np
+    return None if not v else np.asarray(v, np.float32)
+
+
+def _enc_img(img) -> str:
+    if img is None or not getattr(img, "size", 0):
+        return ""
+    import base64
+    import cv2
+    ok, buf = cv2.imencode(".png", img)
+    return base64.b64encode(buf.tobytes()).decode() if ok else ""
+
+
+def _dec_img(s):
+    if not s:
+        return None
+    import base64
+    import cv2
+    import numpy as np
+    return cv2.imdecode(np.frombuffer(base64.b64decode(s), np.uint8), cv2.IMREAD_COLOR)
 
 
 def cache_dir() -> str:
@@ -65,10 +92,14 @@ def save(result, options: dict) -> None:
         "kills": [{"time": k.time, "count": k.count, "evidence": k.evidence,
                    "types": k.types, "weapons": k.weapons} for k in result.kills],
         "deaths": result.deaths,
-        "feed": [{"time": e.time, "kind": e.kind, "headshot": e.headshot, "weapon": e.weapon}
+        "feed": [{"time": e.time, "kind": e.kind, "headshot": e.headshot, "weapon": e.weapon,
+                  "sig": _enc_sig(getattr(e, "name_sig", None)), "img": _enc_img(getattr(e, "name_img", None)),
+                  "counted": getattr(e, "counted", True)}
                  for e in result.feed],
         "feed_used": result.feed_used,
         "events": [e.to_dict() for e in getattr(result, "events", [])],
+        "down": [{"start": d.start, "end": d.end} for d in getattr(result, "down", [])],
+        "scoreboards": [b.to_dict() for b in getattr(result, "scoreboards", [])],
         "hud": result.hud,
         "processing_s": result.processing_s,
     }
@@ -101,7 +132,11 @@ def load(video: str, options: dict) -> Optional[dict]:
     from .labels import HudEvent
     data["events"] = [HudEvent(e["time"], e["kind"], e.get("group", "action"), e.get("count", 1))
                       for e in data.get("events", [])]
-    data["feed"] = [FeedEvent(e["time"], e["kind"], e.get("headshot", False), e.get("weapon", ""))
+    from .screens import DownPeriod, Scoreboard
+    data["down"] = [DownPeriod(d["start"], d["end"]) for d in data.get("down", [])]
+    data["scoreboards"] = [Scoreboard(**b) for b in data.get("scoreboards", [])]
+    data["feed"] = [FeedEvent(e["time"], e["kind"], e.get("headshot", False), e.get("weapon", ""),
+                              _dec_sig(e.get("sig")), _dec_img(e.get("img")), e.get("counted", True))
                     for e in data.get("feed", [])]
     return data
 

@@ -58,6 +58,18 @@ def print_report(r: AnalysisResult) -> None:
         tc = r.type_counts()
         print("  kill types: " + ", ".join(f"{n} {t}" for t, n in sorted(tc.items(), key=lambda x: -x[1])))
         print(f"  most kills in one life: {r.best_life}")
+    if r.feed_used:
+        top = [p for p in r.players() if p.total >= 2][:3]
+        if top:
+            print("  repeat opponents: " + "; ".join(
+                f"#{i + 1} killed {len(p.kills)}x" + (f", killed you {len(p.deaths)}x" if p.deaths else "")
+                + f" ({', '.join(fmt_time(t) for t in sorted(p.kills + p.deaths))})" for i, p in enumerate(top))
+                + "  (names shown in the app's Players view)")
+    for d in r.down:
+        print(f"  down at {fmt_time(d.start)} for {d.duration:.1f}s")
+    for b in r.scoreboards:
+        print(f"  scoreboard at {fmt_time(b.time)}: score {b.score}, K {b.kills} / D {b.deaths} / A {b.assists} "
+              "(whole match so far, from the game)")
     if r.events:
         ec = r.event_counts()
         acts = [k for k in ec if k not in ("kill", "headshot") and not k.endswith("_kill")]
@@ -114,7 +126,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
         try:
             r = analyze(v, sample_fps=a.sample_fps, layout=layout, config=TrackerConfig(),
                         streak_gap=a.streak_gap, streak_min=a.streak_min, window=a.window, progress=progress,
-                        use_feed=not a.no_feed, use_cache=not a.rescan)
+                        use_feed=not a.no_feed, use_cache=True, refresh=a.rescan)
             if a.streak_type:
                 from .events import find_streaks
                 r.streaks = find_streaks(r.kills, a.streak_gap, a.streak_min, r.deaths, a.streak_type)

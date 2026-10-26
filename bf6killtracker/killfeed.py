@@ -36,6 +36,7 @@ class FeedRow:
     headshot: bool = False
     weapon: str = ""  # template name, e.g. "gun_rifle", "explosive_c4", or "other"
     sig: Optional[np.ndarray] = field(default=None, repr=False, compare=False)  # picture of the other name
+    name_img: Optional[np.ndarray] = field(default=None, repr=False, compare=False)  # BGR crop of that name
 
 
 @dataclass
@@ -44,6 +45,9 @@ class FeedEvent:
     kind: str               # "kill" or "death"
     headshot: bool = False
     weapon: str = ""        # e.g. "gun_rifle", "explosive_c4", "other"
+    name_sig: Optional[np.ndarray] = field(default=None, repr=False, compare=False)  # other player's name
+    name_img: Optional[np.ndarray] = field(default=None, repr=False, compare=False)
+    counted: bool = True     # False: duplicate sighting dropped when matching to skull kills
 
     @property
     def category(self) -> str:
@@ -95,6 +99,14 @@ class FeedReader:
         green = (g > 140) & (g - r > 20) & (g - b > 10)
         red = (r > 140) & (r - g > 50) & (r - b > 50)
         return green, red
+
+    @staticmethod
+    def _clean(crop: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Name pixels only (red text on a dark background), for display."""
+        m = cv2.dilate(mask.astype(np.uint8), np.ones((2, 2), np.uint8)).astype(bool)
+        out = np.full_like(crop, 24)
+        out[m] = crop[m]
+        return out
 
     @staticmethod
     def _name_sig(red: np.ndarray) -> np.ndarray:
@@ -157,7 +169,11 @@ class FeedReader:
                 # nothing after your name: you are the victim, the killer is on the left
                 _, r_l = self._masks(left) if left.size else (None, np.zeros((1, 1), bool))
                 if (r_l.sum(axis=0) >= 2).sum() >= 15:
-                    rows.append(FeedRow(x + rx, y + ry, "death", sig=self._name_sig(r_l[:, ::-1])))
+                    cols = np.flatnonzero(r_l.sum(axis=0) >= 2)
+                    img = self._clean(left[:, cols[0]:cols[-1] + 1], r_l[:, cols[0]:cols[-1] + 1]) \
+                        if len(cols) else None
+                    rows.append(FeedRow(x + rx, y + ry, "death", sig=self._name_sig(r_l[:, cols[0]:] if len(cols) else r_l),
+                                        name_img=img))
                 continue
             if len(green_runs) < 2 or red_runs[0][0] < green_runs[1][0]:
                 continue   # no weapon icon (squad wipe etc.)
@@ -173,8 +189,11 @@ class FeedReader:
                 if first_red[1] - first_red[0] <= 45 and len(red_runs) >= 2:
                     rows.append(FeedRow(x + rx, y + ry, "wipe"))
                 continue
-            victim = r_r[:, red_runs[1][0] if hs else first_red[0]:]
-            rows.append(FeedRow(x + rx, y + ry, "kill", hs, self._weapon(zone), self._name_sig(victim)))
+            v0 = red_runs[1][0] if hs else first_red[0]
+            victim = r_r[:, v0:]
+            v1 = v0 + int(np.flatnonzero(victim.sum(axis=0) >= 2)[-1]) + 1
+            rows.append(FeedRow(x + rx, y + ry, "kill", hs, self._weapon(zone), self._name_sig(victim),
+                                self._clean(right[:, v0:v1], r_r[:, v0:v1])))
         rows.sort(key=lambda r: r.y)
         return rows
 
@@ -189,6 +208,7 @@ class _Track:
     weapons: List[str] = field(default_factory=list)
     reported: bool = False
     sigs: List[np.ndarray] = field(default_factory=list)
+    img: Optional[np.ndarray] = None
 
     def signature(self) -> Optional[np.ndarray]:
         if not self.sigs:
@@ -239,6 +259,8 @@ class FeedTracker:
                 tr.weapons.append(r.weapon)
                 if r.sig is not None and r.sig.size:
                     tr.sigs.append(r.sig)
+                if r.name_img is not None and r.name_img.size:
+                    tr.img = r.name_img
         lowest = max((rows[i].y for i in used), default=-1)
         for i, r in enumerate(rows):
             if i in used:
@@ -252,7 +274,7 @@ class FeedTracker:
             if r.y < lowest - 45:
                 continue   # new rows enter at the bottom; this is an old row flickering back
             self.tracks.append(_Track(r, t, t, 1, int(r.headshot), [r.weapon],
-                                      sigs=[r.sig] if r.sig is not None and r.sig.size else []))
+                                      sigs=[r.sig] if r.sig is not None and r.sig.size else [], img=r.name_img))
         for tr in self.tracks:
             if not tr.reported and tr.seen >= self.confirm:
                 tr.reported = True
@@ -297,6 +319,7 @@ class FeedTracker:
             named = [w for w in tr.weapons if w and w != "other"] or tr.weapons
             w = max(set(named), key=named.count) if named else ""
             events.append(FeedEvent(round(tr.first, 3), tr.row.kind,
-                                    kill and tr.hs_votes * 2 >= tr.seen, w if kill else ""))
+                                    kill and tr.hs_votes * 2 >= tr.seen, w if kill else "",
+                                    tr.signature(), tr.img))
         events.sort(key=lambda e: e.time)
         return events
