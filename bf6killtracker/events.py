@@ -10,8 +10,8 @@ unless the pop square was seen or the points counter changed.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-from typing import List, Optional, Tuple
+from dataclasses import asdict, dataclass, field
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -38,11 +38,26 @@ class TrackerConfig:
 class KillEvent:
     time: float
     count: int = 1          # kills registered at once (2+ for a multi-kill from one shot)
-    evidence: str = ""      # "pop" (pop animation seen) or "appear" (skull appeared in an empty HUD)
+    evidence: str = ""      # "pop", "appear" (skull in an empty HUD) or "feed" (kill feed only)
     streak_id: int = -1
+    # kill type per kill, from the kill feed: "headshot", "gun", "explosive", "other" or "unknown"
+    types: List[str] = field(default_factory=list)
+    weapons: List[str] = field(default_factory=list)
+
+    def type_list(self) -> List[str]:
+        t = list(self.types[:self.count])
+        return t + ["unknown"] * (self.count - len(t))
+
+    def matching(self, only: Optional[Sequence[str]]) -> int:
+        """How many of this event's kills are of one of the ``only`` types (all if None)."""
+        if not only:
+            return self.count
+        return sum(1 for t in self.type_list() if t in only)
 
     def to_dict(self):
-        return asdict(self)
+        d = asdict(self)
+        d["types"] = self.type_list()
+        return d
 
 
 @dataclass
@@ -222,32 +237,93 @@ class KillTracker:
         return events
 
 
-def find_streaks(kills: List[KillEvent], max_gap: float = 5.0, min_kills: int = 3) -> List[Streak]:
+def find_streaks(kills: List[KillEvent], max_gap: float = 5.0, min_kills: int = 3,
+                 deaths: Sequence[float] = (), only: Optional[Sequence[str]] = None) -> List[Streak]:
     """Group kills where each follows the previous within ``max_gap`` seconds.
 
     Groups with at least ``min_kills`` kills are returned as streaks, and the
-    kill events are tagged with their streak id.
+    kill events are tagged with their streak id. A death between two kills
+    always ends the streak. With ``only`` (e.g. ``["headshot"]``) only kills of
+    those types count.
     """
     streaks: List[Streak] = []
     group: List[KillEvent] = []
+    deaths = sorted(deaths)
     for k in kills:
         k.streak_id = -1   # reset tags from any previous grouping
 
     def flush():
-        total = sum(k.count for k in group)
+        total = sum(k.matching(only) for k in group)
         if group and total >= min_kills:
             s = Streak(len(streaks), group[0].time, group[-1].time, total)
             for k in group:
                 k.streak_id = s.id
             streaks.append(s)
 
-    for k in sorted(kills, key=lambda e: e.time):
-        if group and k.time - group[-1].time > max_gap:
-            flush()
-            group = []
+    for k in sorted((k for k in kills if k.matching(only) > 0), key=lambda e: e.time):
+        if group:
+            died = any(group[-1].time < d < k.time for d in deaths)
+            if died or k.time - group[-1].time > max_gap:
+                flush()
+                group = []
         group.append(k)
     flush()
     return streaks
+
+
+@dataclass
+class Life:
+    start: float
+    end: float          # time of death (or end of video)
+    kills: int
+    died: bool
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def split_lives(kills: List[KillEvent], deaths: Sequence[float], duration: float) -> List[Life]:
+    """Kills per life: the classic "kills without dying" streak."""
+    bounds = [0.0] + sorted(deaths) + [max(duration, max((k.time for k in kills), default=0.0))]
+    lives = []
+    for i in range(len(bounds) - 1):
+        a, b = bounds[i], bounds[i + 1]
+        n = sum(k.count for k in kills if a < k.time <= b or (i == 0 and k.time == 0))
+        lives.append(Life(a, b, n, i < len(bounds) - 2))
+    return lives
+
+
+def fuse_feed(kills: List[KillEvent], feed_kills: Sequence["object"], before: float = 1.2,
+              after: float = 1.5, absorb: float = 2.5) -> List[KillEvent]:
+    """Combine skull detections with kill-feed rows.
+
+    Every feed row is assigned to the nearest skull event (up to that event's
+    kill count) to give it a kill type and weapon. Feed rows with no skull
+    event within ``absorb`` seconds are kills the skulls missed (smoke,
+    scoreboard...) and are added as events.
+    """
+    feed = sorted(feed_kills, key=lambda e: e.time)
+    used = [False] * len(feed)
+    for k in sorted(kills, key=lambda e: e.time):
+        cands = sorted((abs(f.time - k.time), i) for i, f in enumerate(feed)
+                       if not used[i] and k.time - before <= f.time <= k.time + after)
+        k.types, k.weapons = [], []
+        for _, i in cands[:k.count]:
+            used[i] = True
+            k.types.append(feed[i].category)
+            k.weapons.append(feed[i].weapon)
+    out = list(kills)
+    added: List[float] = []
+    for i, f in enumerate(feed):
+        if used[i]:
+            continue
+        # a leftover row close to a skull event is a duplicate sighting, not a missed kill
+        if any(abs(f.time - k.time) <= absorb for k in kills) or any(abs(f.time - a) <= 1.0 for a in added):
+            continue
+        added.append(f.time)
+        out.append(KillEvent(round(f.time, 3), 1, "feed", -1, [f.category], [f.weapon]))
+    out.sort(key=lambda e: e.time)
+    return out
 
 
 def max_kills_in_window(kills: List[KillEvent], window: float) -> Tuple[int, float]:

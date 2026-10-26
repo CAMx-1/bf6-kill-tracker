@@ -48,14 +48,25 @@ def safe_stem(path: str) -> str:
 
 def print_report(r: AnalysisResult) -> None:
     print(f"\n{r.video}")
-    print(f"  duration {fmt_time(r.duration)}  |  {r.total_kills} kills  |  "
+    deaths = f"  |  {len(r.deaths)} death(s), K/D {r.kd:.1f}" if r.feed_used else ""
+    print(f"  duration {fmt_time(r.duration)}  |  {r.total_kills} kills{deaths}  |  "
           f"{len(r.streaks)} streak(s)  |  processed in {r.processing_s:.1f}s")
-    if r.kills:
-        print("  kills:")
-        for k in r.kills:
+    if r.feed_used and r.kills:
+        tc = r.type_counts()
+        print("  kill types: " + ", ".join(f"{n} {t}" for t, n in sorted(tc.items(), key=lambda x: -x[1])))
+        print(f"  most kills in one life: {r.best_life}")
+    events = sorted([(k.time, "kill", k) for k in r.kills] + [(d, "death", None) for d in r.deaths],
+                    key=lambda e: e[0])
+    if events:
+        print("  timeline:")
+        for t, kind, k in events:
+            if kind == "death":
+                print(f"    {fmt_time(t)}  -- died --")
+                continue
             mult = f" x{k.count}" if k.count > 1 else ""
+            types = f"  ({', '.join(k.type_list())})" if r.feed_used else ""
             tag = f"  [streak {k.streak_id + 1}]" if k.streak_id >= 0 else ""
-            print(f"    {fmt_time(k.time)}{mult}{tag}")
+            print(f"    {fmt_time(t)}{mult}{types}{tag}")
     for s in r.streaks:
         print(f"  STREAK {s.id + 1}: {s.kills} kills in {s.duration:.1f}s  "
               f"({fmt_time(s.start)} - {fmt_time(s.end)})")
@@ -67,11 +78,15 @@ def print_report(r: AnalysisResult) -> None:
 def write_csv(results: List[AnalysisResult], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["video", "time_s", "timestamp", "kills", "streak", "evidence"])
+        w.writerow(["video", "time_s", "timestamp", "event", "kills", "types", "weapons", "streak", "evidence"])
         for r in results:
-            for k in r.kills:
-                w.writerow([r.video, f"{k.time:.3f}", fmt_time(k.time), k.count,
-                            k.streak_id + 1 if k.streak_id >= 0 else "", k.evidence])
+            rows = [(k.time, k) for k in r.kills] + [(d, None) for d in r.deaths]
+            for t, k in sorted(rows, key=lambda x: x[0]):
+                if k is None:
+                    w.writerow([r.video, f"{t:.3f}", fmt_time(t), "death", "", "", "", "", "feed"])
+                    continue
+                w.writerow([r.video, f"{k.time:.3f}", fmt_time(k.time), "kill", k.count, ";".join(k.type_list()),
+                            ";".join(k.weapons), k.streak_id + 1 if k.streak_id >= 0 else "", k.evidence])
 
 
 def cmd_analyze(a: argparse.Namespace) -> int:
@@ -91,7 +106,11 @@ def cmd_analyze(a: argparse.Namespace) -> int:
 
         try:
             r = analyze(v, sample_fps=a.sample_fps, layout=layout, config=TrackerConfig(),
-                        streak_gap=a.streak_gap, streak_min=a.streak_min, window=a.window, progress=progress)
+                        streak_gap=a.streak_gap, streak_min=a.streak_min, window=a.window, progress=progress,
+                        use_feed=not a.no_feed)
+            if a.streak_type:
+                from .events import find_streaks
+                r.streaks = find_streaks(r.kills, a.streak_gap, a.streak_min, r.deaths, a.streak_type)
         except Exception as exc:  # keep going with the remaining files
             print(f"\nerror: {v}: {exc}", file=sys.stderr)
             continue
@@ -198,6 +217,9 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--streak-min", type=int, default=3, help="kills needed to call it a streak (default 3)")
     an.add_argument("--window", type=float, default=10.0,
                     help="also report the most kills inside any window of this many seconds (default 10)")
+    an.add_argument("--streak-type", nargs="+", choices=["headshot", "gun", "explosive", "other"],
+                    help="only count these kill types toward streaks, e.g. --streak-type headshot")
+    an.add_argument("--no-feed", action="store_true", help="don't read the kill feed (faster, no deaths/types)")
     an.add_argument("--sample-fps", type=float, default=None,
                     help="analyse at this frame rate (e.g. 30 for speed); default: the video's own rate")
     an.add_argument("--hud-scale", type=float, default=1.0, help="in-game HUD scale if not default (e.g. 0.9)")
