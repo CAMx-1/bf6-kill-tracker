@@ -95,6 +95,7 @@ class VideoInfo:
     fps: float
     duration: float
     has_audio: bool = False
+    audio_streams: int = 0
 
 
 _DUR_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
@@ -134,8 +135,8 @@ def probe(path: str, ffmpeg: Optional[str] = None) -> VideoInfo:
             break
     if not w:
         raise RuntimeError(f"No video stream found in {path}")
-    has_audio = any("Audio:" in line for line in err.splitlines() if "Stream #" in line)
-    return VideoInfo(w, h, fps or 30.0, duration, has_audio)
+    n_audio = sum(1 for line in err.splitlines() if "Stream #" in line and "Audio:" in line)
+    return VideoInfo(w, h, fps or 30.0, duration, n_audio > 0, n_audio)
 
 
 def read_roi_frames(

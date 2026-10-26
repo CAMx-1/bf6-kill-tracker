@@ -163,3 +163,22 @@ def test_make_montage(app, video, tmp_path):
     assert sum(g.duration for g in w._segments()) <= 13.5
     w.preview.shutdown()
     w.close()
+
+
+def test_effects_and_templates(app, video, tmp_path):
+    from PySide6.QtCore import QSettings
+    from bf6killtracker.gui import EffectsDialog
+    w = MainWindow(QSettings(str(tmp_path / "e.ini"), QSettings.IniFormat))
+    d = EffectsDialog(w, w.effects, {})
+    d.cb_tpl.setCurrentIndex(d.cb_tpl.findData("Montage"))
+    d._apply_template()
+    v = d.values()
+    assert v["transition"] == "whip" and v["killcam"] == "zoom" and v["captions"]
+    d.ed["intro_text"].setText("CAMx")
+    w.effects = d.values()
+    w.apply_template("TikTok hype")
+    o = w.reel_options()
+    assert o.vertical and o.transition == "zoom" and o.killcam == "both" and o.intro_text == "CAMx"
+    assert w.cb_overlays.isChecked() and w.callout_style.position == "Centre"
+    w.preview.shutdown()
+    w.close()

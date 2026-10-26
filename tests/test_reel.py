@@ -231,3 +231,40 @@ def test_montage_pick_and_order():
     assert m[-1].score == 90 and m[0].score == 70          # best last, second-best opens
     assert [c.score for c in m[1:-1]] == sorted(c.score for c in m[1:-1])
     assert [c.score for c in build_up_order(cs[:2])] == [10, 90]
+
+
+# ---------------------------------------------------------------- effects / branding / templates
+from bf6killtracker.reel import TEMPLATES, apply_template, caption_for, make_thumbnail  # noqa: E402
+
+
+def test_templates_and_captions():
+    for name in TEMPLATES:
+        o = apply_template(name)
+        assert o.transition in ("fade", "cut", "crossfade", "whip", "zoom")
+    t = apply_template("TikTok hype")
+    assert t.vertical and t.callout.position == "Centre" and t.killcam == "both"
+    assert caption_for(["headshot"], ["gun_rifle"]) == "HEADSHOT · RIFLE"
+    assert caption_for(["explosive"], ["explosive_c4"]) == "C4"
+    assert caption_for(["gun"], ["other"]) == ""
+
+
+@pytest.mark.parametrize("transition", ["crossfade", "whip", "cut"])
+def test_transitions_cards_watermark(videos, tmp_path, transition):
+    a, _ = videos
+    out = str(tmp_path / f"{transition}.mp4")
+    o = ReelOptions(size=(320, 180), fps=25, transition=transition, transition_s=0.5, intro_text="ME",
+                    outro_text="BYE", card_s=1.5, watermark_text="@me", killcam="both", captions=True,
+                    loudnorm=True, denoise=True)
+    segs = [Segment(a, 0, 2, kills=[(1.0, 1)], captions=[(1.0, "HEADSHOT · RIFLE")]), Segment(a, 4, 6)]
+    build_reel(segs, out, options=o)
+    expected = 1.5 + 2 + 2 + 1.5 - (3 * 0.5 if transition in ("crossfade", "whip") else 0)
+    assert abs(probe(out).duration - expected) < 0.3
+    r = subprocess.run([find_ffmpeg(), "-v", "error", "-i", out, "-f", "null", "-"], capture_output=True, text=True)
+    assert r.returncode == 0
+
+
+def test_thumbnail(videos, tmp_path):
+    from PIL import Image
+    a, _ = videos
+    p = make_thumbnail(a, 1.0, str(tmp_path / "t.jpg"), "5 KILL STREAK", "clutch")
+    assert Image.open(p).size == (1280, 720)

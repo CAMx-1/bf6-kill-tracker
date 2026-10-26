@@ -33,6 +33,11 @@ class Segment:
     label: str = ""
     kills: List[Tuple[float, int]] = field(default_factory=list)   # (source time, kills) inside the clip
     title: str = ""                                                 # shown at the start with overlays on
+    captions: List[Tuple[float, str]] = field(default_factory=list)  # (source time, "HEADSHOT · RIFLE")
+
+    @property
+    def headshots(self) -> List[float]:
+        return [t for t, c in self.captions if "HEADSHOT" in c.upper()]
 
     @property
     def duration(self) -> float:
@@ -70,6 +75,26 @@ class ReelOptions:
     replay_speed: float = 0.5
     replay_before: float = 1.2
     replay_after: float = 0.8
+    # transitions between clips: "fade" (dip to black), "cut", "crossfade", "whip", "zoom"
+    transition: str = "fade"
+    transition_s: float = 0.35
+    # kill-cam effects: "none", "zoom" (punch in on the crosshair at each kill), "shake" (on headshots), "both"
+    killcam: str = "none"
+    captions: bool = False                      # weapon / HEADSHOT caption under each kill
+    # branding
+    intro_text: str = ""                        # e.g. your gamertag; shown on a title card
+    intro_sub: str = ""
+    outro_text: str = ""                        # e.g. "Thanks for watching"
+    outro_sub: str = ""                         # e.g. "Subscribe for more"
+    card_s: float = 2.5
+    watermark_text: str = ""
+    watermark_image: str = ""
+    watermark_pos: str = "Top right"            # Top left / Top right / Bottom left / Bottom right
+    watermark_opacity: float = 0.7
+    # audio
+    audio_track: int = 0                        # which audio track of the recording (0 = first; OBS can record more)
+    denoise: bool = False                       # reduce background noise/hiss (useful for mic tracks)
+    loudnorm: bool = False                      # even out loudness (YouTube's -14 LUFS)
 
 
 # name -> option overrides
@@ -81,6 +106,48 @@ PRESETS: Dict[str, dict] = {
     "Discord (under 25 MB)": dict(size=(1280, 720), fps=30, target_mb=24.0),
     "GIF (small, no sound)": dict(size=(480, 270), fps=12),
 }
+
+
+# looks that bundle effects; "callout" entries override the call-out style
+TEMPLATES: Dict[str, dict] = {
+    "Clean": dict(transition="fade", killcam="none", overlays=False, captions=False, replay=False),
+    "Montage": dict(transition="whip", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
+                    loudnorm=True, callout=dict(position="Upper third", size=110, shadow=True)),
+    "TikTok hype": dict(vertical=True, size=(1080, 1920), transition="zoom", killcam="both", overlays=True,
+                        captions=True, replay=False, beat_sync=True, loudnorm=True,
+                        callout=dict(position="Centre", size=150, color=(255, 220, 40), shadow=True,
+                                     text_streak="{n} IN A ROW", text_multi="{name}!")),
+    "Funny moments": dict(transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
+                          replay_speed=0.35, callout=dict(position="Bottom", size=90, uppercase=False,
+                                                         text_first="gottem", text_streak="{n} and counting",
+                                                         text_multi="{name}?!")),
+}
+
+
+def apply_template(name: str, base: Optional[ReelOptions] = None) -> ReelOptions:
+    o = replace(base or ReelOptions())
+    t = dict(TEMPLATES.get(name, {}))
+    co = t.pop("callout", None)
+    for k, v in t.items():
+        setattr(o, k, v)
+    if co is not None:
+        from .overlay import CalloutStyle
+        st = CalloutStyle.from_json((o.callout or CalloutStyle()).to_json())
+        for k, v in co.items():
+            setattr(st, k, v)
+        o.callout = st
+    return o
+
+
+def caption_for(types: Sequence[str], weapons: Sequence[str]) -> str:
+    """'HEADSHOT · RIFLE' style caption for one kill event."""
+    names = {"gun_rifle": "RIFLE", "gun_m16": "M16", "gun_smg": "SMG", "gun_pistol": "PISTOL",
+             "explosive_c4": "C4"}
+    w = next((names.get(x, x.split("_", 1)[-1].upper()) for x in weapons if x and x != "other"), "")
+    parts = ["HEADSHOT"] if "headshot" in types else (["EXPLOSIVE"] if "explosive" in types and not w else [])
+    if w:
+        parts.append(w)
+    return " · ".join(parts)
 
 
 def apply_preset(name: str, base: Optional[ReelOptions] = None) -> ReelOptions:
@@ -95,7 +162,7 @@ def plan_segments(
     order: Optional[Sequence[str]] = None,
     keep_order: bool = False,
 ) -> List[Segment]:
-    """Turn ``(video, first_kill, last_kill, label[, kills[, title]])`` items into cut segments.
+    """Turn ``(video, first_kill, last_kill, label[, kills[, title[, captions]]])`` items into cut segments.
 
     Adds padding, clamps to the video length and merges segments of the same
     video that would overlap (so footage is never shown twice). Segments are
@@ -107,18 +174,20 @@ def plan_segments(
         video, start, end, label = it[:4]
         kills = list(it[4]) if len(it) > 4 and it[4] else []
         title = it[5] if len(it) > 5 else ""
+        caps = list(it[6]) if len(it) > 6 and it[6] else []
         dur = durations.get(video) or float("inf")
         s = max(0.0, start - pad_before)
         e = min(dur, end + pad_after)
         if e - s < 0.1:
             continue
-        raw.append(Segment(video, s, e, label, kills, title))
+        raw.append(Segment(video, s, e, label, kills, title, caps))
 
     def merge_into(a: Segment, b: Segment) -> None:
         a.start, a.end = min(a.start, b.start), max(a.end, b.end)
         a.label = " + ".join(x for x in (a.label, b.label) if x)
         a.kills = sorted(a.kills + b.kills)
         a.title = a.title or b.title
+        a.captions = sorted(a.captions + b.captions)
 
     if keep_order:
         out: List[Segment] = []
@@ -295,11 +364,46 @@ def _overlay_specs(p: _Part, o: ReelOptions, W: int, H: int, tmp: str, n: int):
             img.save(path)
             x, y = st.place(img.width, img.height, W, H)
             specs.append((path, x, y, rel + 0.15, until))
+    if o.captions and p.seg.captions:
+        for i, (t, text) in enumerate(sorted(p.seg.captions)):
+            rel = (t - p.start) / p.speed
+            if not text or rel < 0 or rel > p.out_dur:
+                continue
+            path = os.path.join(tmp, f"ov{n}_cap{i}.png")
+            w, h = render_text(path, text, int(H * 0.028), color=(235, 235, 235), **common)
+            ax, ay = st.anchor()
+            cy = int(ay * H) + int(H * 0.05 * st.size / 100) + int(H * 0.03)   # just under the call-out
+            if cy + h > H:
+                cy = int(ay * H) - int(H * 0.09)
+            specs.append((path, max(0, min(W - w, int(ax * W - w / 2))), max(0, cy), rel + 0.25,
+                          min(p.out_dur, rel + st.duration)))
     return specs
 
 
+def _killcam_filters(p: "_Part", o: ReelOptions, W: int, H: int, F: float) -> str:
+    """Zoom punch-in at kills and/or screen shake on headshots (output-clip time)."""
+    if p.replay or o.killcam in ("", "none"):
+        return ""
+    out = ""
+    rel = lambda t: (t - p.start) / p.speed  # noqa: E731
+    if o.killcam in ("zoom", "both") and p.seg.kills:
+        bumps = "+".join(f"max(0\\,1-abs(it-{rel(t) + 0.08:.3f})/0.45)" for t, _ in p.seg.kills
+                         if 0 <= rel(t) <= p.out_dur)
+        if bumps:
+            z = f"min(1.22\\,1+0.2*({bumps}))"
+            out += (f",zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={F:g}")
+    if o.killcam in ("shake", "both") and p.seg.headshots:
+        on = "+".join(f"between(t\\,{rel(t):.3f}\\,{rel(t) + 0.35:.3f})" for t in p.seg.headshots
+                      if 0 <= rel(t) <= p.out_dur)
+        if on:
+            sh = max(4, int(H * 0.012))
+            out += (f",crop={W - 2 * sh}:{H - 2 * sh}:x='{sh}+{sh}*sin(t*97)*({on})':"
+                    f"y='{sh}+{sh}*cos(t*71)*({on})',scale={W}:{H}")
+    return out
+
+
 def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: float, enc_args: List[str],
-              out: str, overlays) -> List[str]:
+              out: str, overlays, watermark=None, fades: bool = True) -> List[str]:
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", f"{p.start:.3f}", "-t", f"{p.dur:.3f}", "-i", p.seg.video]
     idx = 1
     if not info.has_audio:
@@ -307,14 +411,19 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         a_in = f"{idx}:a"
         idx += 1
     else:
-        a_in = "0:a:0"
+        a_in = f"0:a:{max(0, min(o.audio_track, (info.audio_streams or 1) - 1))}"
     ov_inputs = []
     for path, *_ in overlays:
         cmd += ["-loop", "1", "-t", f"{p.out_dur:.3f}", "-i", path]
         ov_inputs.append(idx)
         idx += 1
+    wm_in = None
+    if watermark:
+        cmd += ["-loop", "1", "-t", f"{p.out_dur:.3f}", "-i", watermark[0]]
+        wm_in = idx
+        idx += 1
     d = p.out_dur
-    fade_d = min(o.fade, d / 4)
+    fade_d = min(o.fade, d / 4) if fades else 0.0
     chain = "[0:v]"
     if p.speed != 1.0:
         chain += f"setpts=PTS/{p.speed:g},"
@@ -323,6 +432,7 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         chain += "crop=ih*9/16:ih:max(0\\,min(iw-ih*9/16\\,iw/2-ih*0.375)):0,"
     chain += (f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=bicubic:out_range=tv,"
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F:g},format=yuv420p")
+    chain += _killcam_filters(p, o, W, H, F)
     graph = [chain + "[v0]"]
     last = "v0"
     for j, ((path, x, y, a, b), inp) in enumerate(zip(overlays, ov_inputs)):
@@ -331,11 +441,17 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
                      f"fade=t=out:st={max(a, b - fout):.3f}:d={fout}:alpha=1[o{j}]")
         graph.append(f"[{last}][o{j}]overlay={x}:{y}:enable='between(t,{a:.3f},{b:.3f})'[v{j + 1}]")
         last = f"v{j + 1}"
+    if wm_in is not None:
+        graph.append(f"[{wm_in}:v]format=rgba[wm]")
+        graph.append(f"[{last}][wm]overlay={watermark[1]}:{watermark[2]}[vwm]")
+        last = "vwm"
     vf_tail = "format=yuv420p"
     if fade_d > 0:
         vf_tail += f",fade=t=in:st=0:d={fade_d:.3f},fade=t=out:st={d - fade_d:.3f}:d={fade_d:.3f}"
     graph.append(f"[{last}]{vf_tail}[vout]")
     af = f"[{a_in}]aresample=48000,aformat=channel_layouts=stereo"
+    if o.denoise and info.has_audio:
+        af += ",highpass=f=80,afftdn=nf=-25"
     if p.speed != 1.0:
         sp = p.speed
         while sp < 0.5:              # atempo takes 0.5..2 per stage
@@ -345,12 +461,91 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     af += f",volume={o.game_volume:g}"
     if fade_d > 0:
         af += f",afade=t=in:st=0:d={fade_d:.3f},afade=t=out:st={d - fade_d:.3f}:d={fade_d:.3f}"
-    graph.append(af + "[aout]")
+    graph.append(af + ",apad[aout]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]", "-t", f"{d:.3f}",
             *enc_args, "-r", f"{F:g}", "-color_range", "tv",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
             "-video_track_timescale", "90000", out]
     return cmd
+
+
+def _card(ffmpeg: str, text: str, sub: str, o: ReelOptions, W: int, H: int, F: float, enc_args: List[str],
+          tmp: str, name: str) -> str:
+    """A title card (intro/outro) clip with the given text."""
+    from .overlay import CalloutStyle, render_text
+    st = o.callout or CalloutStyle()
+    png = os.path.join(tmp, f"{name}.png")
+    w, h = render_text(png, text, int(H * 0.11), color=st.color, sub=sub, font_path=st.font,
+                       accent=st.accent_color if st.accent else None, outline_pct=0, shadow=True)
+    d = max(1.0, o.card_s)
+    out = os.path.join(tmp, f"{name}.mp4")
+    graph = (f"[0:v]format=yuv420p[bg];[2:v]format=rgba,fade=t=in:st=0.15:d=0.4:alpha=1[t];"
+             f"[bg][t]overlay=(W-w)/2:(H-h)/2,format=yuv420p,fade=t=in:st=0:d=0.3,"
+             f"fade=t=out:st={d - 0.4:.3f}:d=0.4[vout]")
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y",
+           "-f", "lavfi", "-i", f"color=c=0x101418:s={W}x{H}:r={F:g}:d={d:.3f}",
+           "-f", "lavfi", "-t", f"{d:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
+           "-loop", "1", "-t", f"{d:.3f}", "-i", png,
+           "-filter_complex", graph, "-map", "[vout]", "-map", "1:a", "-t", f"{d:.3f}",
+           *enc_args, "-r", f"{F:g}", "-color_range", "tv", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
+           "-ac", "2", "-video_track_timescale", "90000", out]
+    _simple(ffmpeg, cmd[1:], f"making the {name} card")
+    return out
+
+
+def _watermark(o: ReelOptions, W: int, H: int, tmp: str):
+    """(png, x, y) for the watermark, or None."""
+    if not (o.watermark_text or o.watermark_image):
+        return None
+    from PIL import Image
+    from .overlay import render_image
+    if o.watermark_image and os.path.isfile(o.watermark_image):
+        img = Image.open(o.watermark_image).convert("RGBA")
+        th = max(16, int(H * 0.09))
+        img = img.resize((max(1, int(img.width * th / img.height)), th))
+    else:
+        img = render_image(o.watermark_text, max(12, int(H * 0.03)), outline_pct=60, shadow=False)
+    a = img.getchannel("A").point(lambda v: int(v * max(0.0, min(1.0, o.watermark_opacity))))
+    img.putalpha(a)
+    path = os.path.join(tmp, "watermark.png")
+    img.save(path)
+    m = int(H * 0.03)
+    pos = o.watermark_pos.lower()
+    x = W - img.width - m if "right" in pos else m
+    y = H - img.height - m if "bottom" in pos else m
+    return path, x, y
+
+
+_XFADE = {"crossfade": "fade", "whip": "slideleft", "zoom": "zoomin"}
+
+
+def make_thumbnail(video: str, t: float, out_path: str, text: str = "", sub: str = "",
+                   style: Optional["CalloutStyle"] = None, size: Tuple[int, int] = (1280, 720)) -> str:
+    """YouTube-style thumbnail: the frame just after a kill, punchier colours, big text."""
+    import cv2
+    from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
+    from .overlay import CalloutStyle, render_image
+    from .video import grab_frame
+    st = style or CalloutStyle()
+    fr = grab_frame(video, max(0.0, t))
+    img = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).resize(size, Image.LANCZOS)
+    img = ImageEnhance.Contrast(img).enhance(1.25)
+    img = ImageEnhance.Color(img).enhance(1.35)
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=80))
+    W, H = size
+    vign = Image.new("L", size, 0)
+    ImageDraw.Draw(vign).ellipse([-W * 0.25, -H * 0.3, W * 1.25, H * 1.3], fill=255)
+    vign = vign.filter(ImageFilter.GaussianBlur(H // 6))
+    img = Image.composite(img, Image.new("RGB", size, (0, 0, 0)), vign).convert("RGBA")
+    if text:
+        txt = render_image(text.upper() if st.uppercase else text, int(H * 0.15), color=st.color,
+                           accent=st.accent_color if st.accent else None, sub=sub, font_path=st.font,
+                           outline_pct=160, shadow=True)
+        if txt.width > W * 0.92:
+            txt = txt.resize((int(W * 0.92), int(txt.height * W * 0.92 / txt.width)))
+        img.alpha_composite(txt, (int(W * 0.04), int(H * 0.96) - txt.height))
+    img.convert("RGB").save(out_path, quality=92)
+    return out_path
 
 
 def build_reel(
@@ -407,15 +602,33 @@ def build_reel(
         if o.target_mb and not gif:
             audio = 160_000 if not o.music else 192_000
             bitrate = max(300_000, int(o.target_mb * 8_000_000 * 0.93 / total) - audio)
+        xf = _XFADE.get(o.transition) if not gif else None
+        wm = _watermark(o, W, H, tmp)
         for attempt in range(3):
-            files = _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, should_cancel, total)
+            files = _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, should_cancel, total,
+                                  wm, fades=o.transition == "fade")
             if files is None:            # GPU encoder failed: redo everything in software
                 enc = "libx264"
                 files = _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report,
-                                      should_cancel, total)
+                                      should_cancel, total, wm, fades=o.transition == "fade")
+            durs = [p.out_dur for p in parts]
+            ea = encoder_args(enc, o.crf, o.preset, bitrate)
+            if o.intro_text and not gif:
+                report(0.955, "Intro card")
+                files.insert(0, _card(ffmpeg, o.intro_text, o.intro_sub, o, W, H, F, ea, tmp, "intro"))
+                durs.insert(0, max(1.0, o.card_s))
+            if o.outro_text and not gif:
+                report(0.955, "Outro card")
+                files.append(_card(ffmpeg, o.outro_text, o.outro_sub, o, W, H, F, ea, tmp, "outro"))
+                durs.append(max(1.0, o.card_s))
             joined = os.path.join(tmp, "joined.mp4")
             report(0.96, "Joining clips")
-            _concat(ffmpeg, files, joined, tmp)
+            if xf and len(files) > 1:
+                _xfade_join(ffmpeg, files, durs, joined, xf, min(o.transition_s, min(durs) / 3), ea, F)
+                total = sum(durs) - (len(durs) - 1) * min(o.transition_s, min(durs) / 3)
+            else:
+                _concat(ffmpeg, files, joined, tmp)
+                total = sum(durs)
             final = joined
             if o.music and not gif:
                 report(0.97, "Adding music")
@@ -427,6 +640,13 @@ def build_reel(
                 report(0.98, "Making GIF")
                 _to_gif(ffmpeg, final, out_path, W, F)
                 break
+            if o.loudnorm:
+                report(0.985, "Evening out loudness")
+                ln = os.path.join(tmp, "loud.mp4")
+                _simple(ffmpeg, ["-i", final, "-map", "0:v", "-map", "0:a", "-c:v", "copy",
+                                 "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
+                                 "-ar", "48000", ln], "normalising loudness")
+                final = ln
             _faststart(ffmpeg, final, out_path)
             if not o.target_mb or os.path.getsize(out_path) <= o.target_mb * 1_000_000 or attempt == 2:
                 break
@@ -438,14 +658,15 @@ def build_reel(
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, should_cancel, total):
+def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, should_cancel, total,
+                  watermark=None, fades=True):
     files: List[str] = []
     done = 0.0
     enc_args = encoder_args(enc, o.crf, o.preset, bitrate)
     for n, p in enumerate(parts):
         out = os.path.join(tmp, f"part{n:04d}.mp4")
         ovs = _overlay_specs(p, o, W, H, tmp, n)
-        cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs)
+        cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades)
         label = ("Replay: " if p.replay else "") + (p.seg.label or os.path.basename(p.seg.video))
         base = done
         try:
@@ -467,6 +688,25 @@ def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:
         for p in files:
             f.write("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n")
     _simple(ffmpeg, ["-f", "concat", "-safe", "0", "-i", listing, "-c", "copy", out], "joining clips")
+
+
+def _xfade_join(ffmpeg: str, files: List[str], durs: List[float], out: str, kind: str, d: float,
+                enc_args: List[str], F: float) -> None:
+    """Join clips with an ``xfade`` transition (video) and a matching audio crossfade."""
+    args: List[str] = []
+    for f in files:
+        args += ["-i", f]
+    v, a = "[0:v]", "[0:a]"
+    graph = []
+    offset = 0.0
+    for i in range(1, len(files)):
+        offset += durs[i - 1] - d
+        graph.append(f"{v}[{i}:v]xfade=transition={kind}:duration={d:.3f}:offset={offset:.3f}[v{i}]")
+        graph.append(f"{a}[{i}:a]acrossfade=d={d:.3f}[a{i}]")
+        v, a = f"[v{i}]", f"[a{i}]"
+    graph.append(f"{v}format=yuv420p[vout]")
+    _simple(ffmpeg, [*args, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", a, *enc_args,
+                     "-r", f"{F:g}", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", out], "joining clips")
 
 
 def _mix_music(ffmpeg: str, video: str, o: ReelOptions, total: float, out: str) -> None:

@@ -159,7 +159,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
                 print(f"  clip: {out}")
 
     if a.reel:
-        from .reel import PRESETS, ReelOptions, apply_preset, build_reel, plan_segments
+        from .reel import PRESETS, ReelOptions, apply_preset, build_reel, caption_for, plan_segments
         items = []
         if a.montage:
             from .hype import pick_montage, score_result
@@ -169,20 +169,37 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             for c in picks:
                 print(f"  {c.score:5.1f} {c.stars}  {os.path.basename(c.video)} {fmt_time(c.start)}  "
                       f"({', '.join(c.reasons)})")
-                items.append((c.video, c.start, c.end, f"{c.title} {fmt_time(c.start)}", c.kill_times, c.title))
+                r0 = next(r for r in results if r.video == c.video)
+                ks = [k for k in r0.kills if c.start - 0.01 <= k.time <= c.end + 0.01]
+                items.append((c.video, c.start, c.end, f"{c.title} {fmt_time(c.start)}", c.kill_times, c.title,
+                              [(k.time, caption_for(k.type_list(), k.weapons)) for k in ks]))
         else:
             for r in results:
                 for s in r.streaks:
-                    ks = [(k.time, k.count) for k in r.kills if k.streak_id == s.id]
-                    items.append((r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}", ks,
-                                  os.path.splitext(os.path.basename(r.video))[0]))
+                    kev = [k for k in r.kills if k.streak_id == s.id]
+                    items.append((r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}",
+                                  [(k.time, k.count) for k in kev], os.path.splitext(os.path.basename(r.video))[0],
+                                  [(k.time, caption_for(k.type_list(), k.weapons)) for k in kev]))
         segs = plan_segments(items, {r.video: r.duration for r in results}, a.pad_before, a.pad_after,
                              order=[r.video for r in results], keep_order=bool(a.montage))
         if segs:
+            from .reel import apply_template
             o = apply_preset(a.preset, ReelOptions(encoder=a.encoder))
+            if a.template:
+                o = apply_template(a.template, o)
             o.music, o.music_volume, o.beat_sync = a.music, a.music_volume, a.beat_sync
-            o.overlays, o.titles, o.replay = a.overlays, a.titles, a.replay
-            o.callout = callout_style_from_args(a)
+            o.overlays, o.titles, o.replay = a.overlays or o.overlays, a.titles, a.replay or o.replay
+            o.beat_sync = a.beat_sync or o.beat_sync
+            o.callout = callout_style_from_args(a, o.callout)
+            for k in ("transition", "killcam", "intro_text", "intro_sub", "outro_text", "outro_sub",
+                      "watermark_text", "watermark_image", "watermark_pos"):
+                if getattr(a, k, None):
+                    setattr(o, k, getattr(a, k))
+            o.captions = a.captions or o.captions
+            o.loudnorm = a.loudnorm or o.loudnorm
+            o.denoise = a.denoise or o.denoise
+            if a.audio_track:
+                o.audio_track = a.audio_track - 1
             if a.max_mb:
                 o.target_mb = a.max_mb
 
@@ -190,6 +207,16 @@ def cmd_analyze(a: argparse.Namespace) -> int:
                 if not a.quiet:
                     print(f"\r  highlight video: {f * 100:5.1f}%  {msg[:50]:<50}", end="", file=sys.stderr, flush=True)
             build_reel(segs, a.reel, options=o, progress=reel_progress)
+            if a.thumbnail:
+                from .hype import rank, score_result
+                from .reel import make_thumbnail
+                best = rank([c for r in results for c in score_result(r)])
+                if best:
+                    b = best[0]
+                    t = max(b.kill_times, key=lambda k: (k[1], k[0]))[0] if b.kill_times else b.start
+                    make_thumbnail(b.video, t + 0.5, a.thumbnail, f"{b.kills} KILL STREAK" if b.kills > 2
+                                   else ("DOUBLE KILL" if b.kills == 2 else "KILL"), "", o.callout)
+                    print(f"wrote {a.thumbnail}")
             if not a.quiet:
                 print(file=sys.stderr)
             print(f"\nwrote {a.reel} ({len(segs)} clips)")
@@ -223,9 +250,9 @@ def _hex(v: str):
     return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def callout_style_from_args(a: argparse.Namespace):
+def callout_style_from_args(a: argparse.Namespace, base=None):
     from .overlay import CalloutStyle
-    st = CalloutStyle()
+    st = CalloutStyle.from_json(base.to_json()) if base is not None else CalloutStyle()
     if getattr(a, "callout_style", None):
         with open(a.callout_style, encoding="utf-8") as f:
             st = CalloutStyle.from_json(f.read())
@@ -323,6 +350,20 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--montage", type=float, metavar="SECONDS",
                     help="with --reel: auto-pick the highest-hype clips (streaks and single kills) to fill about "
                          "this many seconds, ordered to build up to the best one")
+    from .reel import TEMPLATES
+    an.add_argument("--template", choices=list(TEMPLATES), help="a ready-made look for the highlight video")
+    an.add_argument("--transition", choices=["fade", "cut", "crossfade", "whip", "zoom"])
+    an.add_argument("--killcam", choices=["none", "zoom", "shake", "both"],
+                    help="zoom in on each kill and/or shake on headshots")
+    an.add_argument("--captions", action="store_true", help="caption each kill (HEADSHOT · RIFLE...)")
+    an.add_argument("--intro-text"), an.add_argument("--intro-sub")
+    an.add_argument("--outro-text"), an.add_argument("--outro-sub")
+    an.add_argument("--watermark-text"), an.add_argument("--watermark-image")
+    an.add_argument("--watermark-pos", choices=["Top left", "Top right", "Bottom left", "Bottom right"])
+    an.add_argument("--audio-track", type=int, metavar="N", help="which audio track to use (1 = first)")
+    an.add_argument("--denoise", action="store_true", help="reduce background noise in the game/mic audio")
+    an.add_argument("--loudnorm", action="store_true", help="even out loudness (YouTube level)")
+    an.add_argument("--thumbnail", metavar="FILE.jpg", help="with --reel: also save a YouTube thumbnail")
     an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
     an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
     an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")

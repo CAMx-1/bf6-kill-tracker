@@ -460,6 +460,172 @@ class CalloutDialog(QDialog):
         return self.style_
 
 
+EFFECT_DEFAULTS = dict(template="", transition="fade", transition_s=0.35, killcam="none", captions=False,
+                       intro_text="", intro_sub="", outro_text="", outro_sub="", card_s=2.5,
+                       watermark_text="", watermark_image="", watermark_pos="Top right", watermark_opacity=0.7,
+                       audio_track=0, denoise=False, loudnorm=False, thumbnail=False)
+
+
+class EffectsDialog(QDialog):
+    """Transitions, kill-cam effects, captions, intro/outro cards, watermark, audio and templates."""
+    TRANSITIONS = [("Fade through black", "fade"), ("Hard cut", "cut"), ("Crossfade", "crossfade"),
+                   ("Whip pan (slide)", "whip"), ("Zoom", "zoom")]
+    KILLCAMS = [("None", "none"), ("Zoom in on each kill", "zoom"), ("Shake on headshots", "shake"),
+                ("Zoom + shake", "both")]
+
+    def __init__(self, parent, values: dict, user_templates: dict):
+        super().__init__(parent)
+        from .reel import TEMPLATES
+        self.setWindowTitle("Effects & branding")
+        self.v = {**EFFECT_DEFAULTS, **values}
+        self.user_templates = dict(user_templates)
+        self.template_applied: Optional[str] = None
+        lay = QVBoxLayout(self)
+        form = QFormLayout()
+        lay.addLayout(form)
+        trow = QHBoxLayout()
+        self.cb_tpl = QComboBox()
+        self.cb_tpl.addItem("— choose a look —", "")
+        for n in TEMPLATES:
+            self.cb_tpl.addItem(n, n)
+        for n in self.user_templates:
+            self.cb_tpl.addItem(f"{n} (yours)", "user:" + n)
+        b_apply = QPushButton("Apply")
+        b_apply.setToolTip("Sets transitions, effects, call-out style, extras and (for TikTok) the vertical export")
+        b_apply.clicked.connect(self._apply_template)
+        b_save = QPushButton("Save current as template…")
+        b_save.clicked.connect(self._save_template)
+        trow.addWidget(self.cb_tpl, 1)
+        trow.addWidget(b_apply)
+        trow.addWidget(b_save)
+        form.addRow("<b>Template</b>", trow)
+        self.cb_tr = QComboBox()
+        self.cb_tr.addItems([n for n, _ in self.TRANSITIONS])
+        self.sp_tr = QDoubleSpinBox()
+        self.sp_tr.setRange(0.1, 2.0)
+        self.sp_tr.setSingleStep(0.05)
+        self.sp_tr.setSuffix(" s")
+        tr_row = QHBoxLayout()
+        tr_row.addWidget(self.cb_tr, 1)
+        tr_row.addWidget(self.sp_tr)
+        form.addRow("Transitions", tr_row)
+        self.cb_kc = QComboBox()
+        self.cb_kc.addItems([n for n, _ in self.KILLCAMS])
+        form.addRow("Kill-cam effect", self.cb_kc)
+        self.cb_cap = QCheckBox("Caption each kill (HEADSHOT · RIFLE, C4…)")
+        form.addRow("", self.cb_cap)
+        self.ed = {}
+        for key, label, ph in (("intro_text", "Intro card", "e.g. your gamertag (empty = no intro)"),
+                               ("intro_sub", "", "small line, e.g. BF6 highlights"),
+                               ("outro_text", "Outro card", "e.g. Thanks for watching (empty = none)"),
+                               ("outro_sub", "", "e.g. Subscribe for more"),
+                               ("watermark_text", "Watermark", "e.g. @yourname (or pick an image)")):
+            e = QLineEdit()
+            e.setPlaceholderText(ph)
+            self.ed[key] = e
+            form.addRow(label, e)
+        wrow = QHBoxLayout()
+        self.ed_wimg = QLineEdit()
+        self.ed_wimg.setPlaceholderText("logo image (PNG with transparency)")
+        b_w = QPushButton("Image…")
+        b_w.clicked.connect(self._pick_logo)
+        self.cb_wpos = QComboBox()
+        self.cb_wpos.addItems(["Top left", "Top right", "Bottom left", "Bottom right"])
+        self.sp_wop = QSpinBox()
+        self.sp_wop.setRange(10, 100)
+        self.sp_wop.setSuffix(" % opacity")
+        wrow.addWidget(self.ed_wimg, 1)
+        wrow.addWidget(b_w)
+        wrow.addWidget(self.cb_wpos)
+        wrow.addWidget(self.sp_wop)
+        form.addRow("", wrow)
+        self.sp_card = QDoubleSpinBox()
+        self.sp_card.setRange(1, 8)
+        self.sp_card.setSuffix(" s per card")
+        form.addRow("", self.sp_card)
+        self.sp_track = QSpinBox()
+        self.sp_track.setRange(1, 8)
+        self.sp_track.setPrefix("track ")
+        self.sp_track.setToolTip("OBS can record game and mic on separate tracks; pick which one to use")
+        form.addRow("Game audio", self.sp_track)
+        self.cb_dn = QCheckBox("Reduce background noise / hiss")
+        self.cb_ln = QCheckBox("Even out loudness (YouTube level)")
+        self.cb_thumb = QCheckBox("Also save a YouTube thumbnail (.jpg next to the video)")
+        form.addRow("", self.cb_dn)
+        form.addRow("", self.cb_ln)
+        form.addRow("Extras", self.cb_thumb)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+        self._load(self.v)
+
+    def _load(self, v: dict) -> None:
+        self.cb_tr.setCurrentIndex(next((i for i, (_, k) in enumerate(self.TRANSITIONS) if k == v["transition"]), 0))
+        self.sp_tr.setValue(float(v["transition_s"]))
+        self.cb_kc.setCurrentIndex(next((i for i, (_, k) in enumerate(self.KILLCAMS) if k == v["killcam"]), 0))
+        self.cb_cap.setChecked(bool(v["captions"]))
+        for k, e in self.ed.items():
+            e.setText(str(v.get(k, "")))
+        self.ed_wimg.setText(v["watermark_image"])
+        self.cb_wpos.setCurrentText(v["watermark_pos"])
+        self.sp_wop.setValue(int(round(float(v["watermark_opacity"]) * 100)))
+        self.sp_card.setValue(float(v["card_s"]))
+        self.sp_track.setValue(int(v["audio_track"]) + 1)
+        self.cb_dn.setChecked(bool(v["denoise"]))
+        self.cb_ln.setChecked(bool(v["loudnorm"]))
+        self.cb_thumb.setChecked(bool(v["thumbnail"]))
+
+    def values(self) -> dict:
+        v = dict(self.v)
+        v.update(transition=self.TRANSITIONS[self.cb_tr.currentIndex()][1], transition_s=self.sp_tr.value(),
+                 killcam=self.KILLCAMS[self.cb_kc.currentIndex()][1], captions=self.cb_cap.isChecked(),
+                 watermark_image=self.ed_wimg.text(), watermark_pos=self.cb_wpos.currentText(),
+                 watermark_opacity=self.sp_wop.value() / 100, card_s=self.sp_card.value(),
+                 audio_track=self.sp_track.value() - 1, denoise=self.cb_dn.isChecked(),
+                 loudnorm=self.cb_ln.isChecked(), thumbnail=self.cb_thumb.isChecked())
+        for k, e in self.ed.items():
+            v[k] = e.text()
+        return v
+
+    def _apply_template(self) -> None:
+        from .reel import TEMPLATES
+        key = self.cb_tpl.currentData()
+        if not key:
+            return
+        t = self.user_templates[key[5:]] if key.startswith("user:") else TEMPLATES[key]
+        cur = self.values()
+        for k in EFFECT_DEFAULTS:
+            if k in t:
+                cur[k] = t[k]
+        self._load(cur)
+        self.v = cur
+        self.template_applied = key
+
+    def _save_template(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Save template", "Template name:")
+        if ok and name.strip():
+            self.user_templates[name.strip()] = {k: v for k, v in self.values().items()
+                                                 if k not in ("template", "thumbnail")}
+            self.user_templates[name.strip()]["_main"] = True     # also store main-window extras on OK
+            self.cb_tpl.addItem(f"{name.strip()} (yours)", "user:" + name.strip())
+            self.cb_tpl.setCurrentIndex(self.cb_tpl.count() - 1)
+            self.template_applied = "save:" + name.strip()
+
+    def _pick_logo(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "Watermark image", os.path.expanduser("~"),
+                                           "Images (*.png *.jpg *.jpeg *.webp)")
+        if f:
+            self.ed_wimg.setText(f)
+
+
 class ReviewDialog(QDialog):
     """Check every detection: ✓ correct, ✗ not a kill, fix the count, or add a missed kill/death.
 
@@ -1073,6 +1239,16 @@ class MainWindow(QMainWindow):
         callout_row = QHBoxLayout()
         callout_row.addWidget(self.cb_overlays)
         callout_row.addWidget(self.btn_callout)
+        self.btn_effects = QPushButton("Effects && branding…")
+        self.btn_effects.setToolTip("Transitions, kill-cam zoom/shake, captions, intro/outro, watermark, audio, "
+                                    "templates, thumbnail")
+        self.btn_effects.clicked.connect(self.edit_effects)
+        callout_row.addWidget(self.btn_effects)
+        import json as _json
+        try:
+            self.effects = {**EFFECT_DEFAULTS, **_json.loads(self.settings.value("effects", "") or "{}")}
+        except ValueError:
+            self.effects = dict(EFFECT_DEFAULTS)
         callout_row.addStretch(1)
         self.cb_titles = QCheckBox("Video name at the start of each clip")
         self.cb_titles.setChecked(self.settings.value("titles", "false") == "true")
@@ -1510,7 +1686,9 @@ class MainWindow(QMainWindow):
             start, end = c.start, c.end
         kills = [(k.time, k.count) for k in c.events]
         title = os.path.splitext(v.name)[0]
-        return (v.path, start, end, f"{v.name} {c.title.lower()} ({c.kills} kills)", kills, title)
+        from .reel import caption_for
+        caps = [(k.time, caption_for(k.type_list(), k.weapons)) for k in c.events]
+        return (v.path, start, end, f"{v.name} {c.title.lower()} ({c.kills} kills)", kills, title, caps)
 
     def _ordered_selection(self):
         sel = {(v.path, c.key): (v, c) for v, c in self._selected_clips()}
@@ -1671,6 +1849,75 @@ class MainWindow(QMainWindow):
             self._mark_tree_item(v, c)
             self._update_reel_summary()
 
+    def save_thumbnail(self, out: str) -> str:
+        """Thumbnail from the best (highest-hype) ticked clip."""
+        from .reel import make_thumbnail
+        best = max(self._selected_clips(), key=lambda vc: self._hype(*vc)[0], default=None)
+        if best is None:
+            raise RuntimeError("nothing selected")
+        v, c = best
+        k = max(c.events, key=lambda e: (e.count, e.time)) if c.events else None
+        t = (k.time if k else c.start) + 0.5
+        text = f"{c.kills} KILL STREAK" if c.kind == "streak" else c.title
+        why = self._hype(v, c)[1]
+        special = next((w for w in why if w in ("last squad member alive", "squad wipe", "tank buster")), "")
+        make_thumbnail(v.path, t, out, text, special, self.callout_style)
+        self.status.setText(self.status.text() + f" · thumbnail {os.path.basename(out)}")
+        return out
+
+    def _user_templates(self) -> dict:
+        import json as _json
+        try:
+            return _json.loads(self.settings.value("user_templates", "") or "{}")
+        except ValueError:
+            return {}
+
+    def edit_effects(self) -> None:
+        import json as _json
+        dlg = EffectsDialog(self, self.effects, self._user_templates())
+        if not dlg.exec():
+            return
+        self.effects = dlg.values()
+        self.settings.setValue("effects", _json.dumps(self.effects))
+        key = dlg.template_applied or ""
+        ut = dict(dlg.user_templates)
+        if key.startswith("save:"):           # remember the main-window extras with the template
+            t = ut[key[5:]]
+            t.update(overlays=self.cb_overlays.isChecked(), replay=self.cb_replay.isChecked(),
+                     beat_sync=self.cb_beat.isChecked(), callout=_json.loads(self.callout_style.to_json()),
+                     preset=self.cb_preset.currentText())
+        self.settings.setValue("user_templates", _json.dumps(ut))
+        if key and not key.startswith("save:"):
+            self.apply_template(key)
+
+    def apply_template(self, key: str) -> None:
+        """Set the main-window extras (call-outs, replay, beat sync, call-out style, export) from a template."""
+        from .reel import TEMPLATES
+        if key.startswith("user:"):
+            t = self._user_templates().get(key[5:], {})
+        else:
+            t = TEMPLATES.get(key, {})
+        for k, cb in (("overlays", self.cb_overlays), ("replay", self.cb_replay), ("beat_sync", self.cb_beat)):
+            if k in t:
+                cb.setChecked(bool(t[k]))
+        if "callout" in t:
+            st = CalloutStyle.from_json(self.callout_style.to_json())
+            for k, val in t["callout"].items():
+                setattr(st, k, tuple(val) if isinstance(val, list) else val)
+            self.callout_style = st
+            self.settings.setValue("callout_style", st.to_json())
+        if t.get("vertical"):
+            self.cb_preset.setCurrentText("Vertical 9:16 (TikTok / Shorts / Reels)")
+        elif t.get("preset"):
+            self.cb_preset.setCurrentText(t["preset"])
+        for k in EFFECT_DEFAULTS:
+            if k in t:
+                self.effects[k] = t[k]
+        self.effects["template"] = key
+        import json as _json
+        self.settings.setValue("effects", _json.dumps(self.effects))
+        self.status.setText(f"Applied the “{key.replace('user:', '')}” look.")
+
     def edit_callout_style(self) -> None:
         frame = None
         v, c = self._current_clip()
@@ -1715,6 +1962,9 @@ class MainWindow(QMainWindow):
             self.cb_replay.isChecked()
         o.encoder = self._encoders[self.cb_encoder.currentIndex()][1]
         o.callout = self.callout_style
+        for k, val in self.effects.items():
+            if hasattr(o, k):
+                setattr(o, k, val)
         self.settings.setValue("callout_style", self.callout_style.to_json())
         for key, val in (("music", self.ed_music.text()), ("music_volume", self.sp_music_vol.value()),
                          ("duck", o.duck), ("beat_sync", o.beat_sync), ("overlays", o.overlays),
@@ -1816,6 +2066,11 @@ class MainWindow(QMainWindow):
         self.settings.setValue("open_after", "true" if self.cb_open.isChecked() else "false")
         self._refresh_buttons()
         self.last_reel = path
+        if self.effects.get("thumbnail") and not path.lower().endswith(".gif"):
+            try:
+                self.save_thumbnail(os.path.splitext(path)[0] + "_thumbnail.jpg")
+            except Exception as exc:
+                self.status.setText(self.status.text() + f" (thumbnail failed: {exc})")
         if self.cb_open.isChecked():
             open_with_system(path)
 
@@ -1966,7 +2221,8 @@ class MainWindow(QMainWindow):
                 v.path, path, selected=v.selected, trims={k: list(t) for k, t in v.trims.items()}))
         settings = {k: self.settings.value(k) for k in (
             "streak_min", "streak_gap", "streak_types", "show_singles", "pad_before", "pad_after", "reel_preset",
-            "music", "music_volume", "duck", "beat_sync", "overlays", "titles", "replay", "encoder", "callout_style")}
+            "music", "music_volume", "duck", "beat_sync", "overlays", "titles", "replay", "encoder", "callout_style",
+            "effects")}
         self.reel_options()   # make sure the latest UI values are in settings
         settings = {k: self.settings.value(k) for k in settings}
         return {"videos": vids, "order": [list(k) for k in self.reel_order], "settings": settings}
@@ -2020,6 +2276,13 @@ class MainWindow(QMainWindow):
         self.ed_music.setText(str(st.get("music") or ""))
         if st.get("callout_style"):
             self.callout_style = CalloutStyle.from_json(st["callout_style"])
+        if st.get("effects"):
+            import json as _json
+            try:
+                self.effects = {**EFFECT_DEFAULTS, **_json.loads(st["effects"])}
+                self.settings.setValue("effects", st["effects"])
+            except ValueError:
+                pass
         self.videos = []
         missing = [v["path"] for v in data["videos"] if not os.path.isfile(v["path"])]
         self.add_paths([v["path"] for v in data["videos"] if os.path.isfile(v["path"])])
