@@ -162,21 +162,17 @@ class SkullDetector:
                 if float(cv2.matchTemplate(patch, neg, cv2.TM_CCOEFF_NORMED).max()) > best:
                     best = min(best, 0.3)
                     break
-            # correlation ignores contrast; a real icon is clearly brighter than its surroundings
-            sub = patch[best_loc[1]:best_loc[1] + th, best_loc[0]:best_loc[0] + tw]
-            body = self.body_masks[best_t]
-            if sub.shape == body.shape:
-                contrast = float(sub[body].mean()) - float(sub[~body].mean())
-                if contrast < self.min_contrast:
-                    best = min(best, 0.3)
-            # reject yellow icons (e.g. "order completed"); kill skulls are white or red
+            # correlation ignores contrast: a real icon must stand out from its surroundings
+            # in at least one colour channel (white on yellow grass shows up in blue,
+            # red headshot skulls in red), and its own pixels must not be yellow/green
             cx, cy = x0 + best_loc[0], y0 + best_loc[1]
-            icon = roi_bgr[cy:cy + th, cx:cx + tw].astype(np.int16)
-            bright = icon[:, :, 2] > 150
-            if bright.sum() > 40:
-                g = icon[:, :, 1][bright].mean()
-                b = icon[:, :, 0][bright].mean()
-                if g - b > 50:
+            icon = roi_bgr[cy:cy + th, cx:cx + tw].astype(np.float32)
+            body = self.body_masks[best_t]
+            if icon.shape[:2] == body.shape:
+                inside, outside = icon[body], icon[~body]
+                contrast = float((inside.mean(axis=0) - outside.mean(axis=0)).max())
+                b, g, r = inside.mean(axis=0)
+                if contrast < self.min_contrast or (g - b > 60 and b < 140 and r > 150):
                     best = min(best, 0.3)
             scores[k] = best
 

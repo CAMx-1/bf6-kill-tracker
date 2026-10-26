@@ -152,6 +152,7 @@ class KillTracker:
         counts = _rolling_median_int(contiguous, max(1, int(round(0.15 * fps))) | 1)
         self.counts = counts
         p0 = present[:, 0]
+        total = _rolling_median_int(present.sum(axis=1).astype(np.int8), max(1, int(round(0.15 * fps))) | 1)
 
         def persists(i: int) -> bool:
             """Skull really settled in the slot (not a one-off false match)."""
@@ -185,7 +186,14 @@ class KillTracker:
             look_end = min(F, b + int(cfg.skull_after_pop_s * fps), nxt_pop)
             on = np.flatnonzero(p0[b:look_end])
             if not len(on) or not persists(b + int(on[0])):
-                continue   # pop of a non-kill icon (spot, assist, order...)
+                # the rightmost slot can hold a non-skull icon (e.g. the vehicle-destroyed
+                # gear), pushing the new skull one slot left: count skulls anywhere instead
+                before = int(np.median(total[max(0, a - int(0.3 * fps)):a])) if a > 0 else 0
+                after_seg = total[b + int(0.2 * fps):look_end + int(0.5 * fps)]
+                after = int(np.median(after_seg)) if len(after_seg) else 0
+                if after > before:
+                    events.append(KillEvent(round(float(t[a]), 3), after - before, "pop"))
+                continue   # otherwise: pop of a non-kill icon (spot, assist, order...)
             i = b + int(on[0])
             n = max(1, n_skulls(i, nxt_pop) - n_before(a))
             events.append(KillEvent(round(float(t[a]), 3), n, "pop"))

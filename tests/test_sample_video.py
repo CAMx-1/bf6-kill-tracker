@@ -19,7 +19,7 @@ GROUND_TRUTH = [
     (77.95, 2), (83.3, 1),
 ]
 
-pytestmark = pytest.mark.skipif(not os.path.isfile(SAMPLE), reason="sample video not available")
+needs_sample = pytest.mark.skipif(not os.path.isfile(SAMPLE), reason="sample video not available")
 
 
 def match(events, tol=0.8):
@@ -32,6 +32,7 @@ def match(events, tol=0.8):
     return pairs
 
 
+@needs_sample
 @pytest.mark.parametrize("fps", [None, 30.0])
 def test_sample_video(fps):
     r = analyze(SAMPLE, sample_fps=fps)
@@ -41,3 +42,25 @@ def test_sample_video(fps):
     assert all(e.count == c for e, (_, c) in pairs)               # multi-kills counted right
     assert [s.kills for s in r.streaks] == [3, 3, 3, 3]
     assert r.best_window_kills == 5
+
+
+# Further clips checked by hand against the skulls and the kill feed (CAMx rows).
+DL = os.path.expanduser("~/Downloads")
+EXTRA = {
+    # indoor, includes a squad revive (green icon, not a kill) and a 4-kill burst ("KILL x4")
+    "Battlefield™ 6 - 2026-06-14 11-33-50 PM.mp4": dict(total=7, streak_kills=[5]),
+    # dirt bike + C4: tank kill whose vehicle-destroyed gear sits in the skull slot,
+    # white skulls over yellow flowers, then a C4 double kill
+    "bike-c4.mp4": dict(total=4, streak_kills=[4]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(EXTRA))
+def test_extra_clips(name):
+    path = os.path.join(DL, name)
+    if not os.path.isfile(path):
+        pytest.skip("clip not available")
+    exp = EXTRA[name]
+    r = analyze(path)
+    assert r.total_kills == exp["total"]
+    assert [s.kills for s in r.streaks] == exp["streak_kills"]
