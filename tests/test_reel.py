@@ -70,3 +70,81 @@ def test_build_reel_cancel(videos, tmp_path):
 def test_build_reel_requires_segments(tmp_path):
     with pytest.raises(ValueError):
         build_reel([], str(tmp_path / "x.mp4"))
+
+
+# ---------------------------------------------------------------- reel extras
+from bf6killtracker.music import detect_beats, load_mono, snap_to_beats  # noqa: E402
+from bf6killtracker.reel import ReelOptions, apply_preset, encoder_args, pick_encoder  # noqa: E402
+from bf6killtracker.video import NO_WINDOW  # noqa: E402
+
+
+def _audio_level(path):
+    r = subprocess.run([find_ffmpeg(), "-hide_banner", "-i", path, "-af", "volumedetect", "-f", "null", "-"],
+                       capture_output=True, text=True, **NO_WINDOW)
+    line = next(ln for ln in r.stderr.splitlines() if "mean_volume" in ln)
+    return float(line.split("mean_volume:")[1].split("dB")[0])
+
+
+@pytest.fixture(scope="module")
+def click_track(tmp_path_factory):
+    p = str(tmp_path_factory.mktemp("music") / "clicks.wav")
+    subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi",
+                    "-i", "sine=frequency=1000:duration=0.05,apad=pad_dur=0.45",
+                    "-filter_complex", "aloop=loop=-1:size=22050,atrim=0:30,asetpts=N/SR/TB", "-ar", "44100", p],
+                   check=True, **NO_WINDOW)
+    return p
+
+
+def test_beat_detection(click_track):
+    bpm, beats = detect_beats(load_mono(click_track))
+    assert bpm == pytest.approx(120, abs=1.5)
+    assert all(abs((b + 0.25) % 0.5 - 0.25) < 0.03 for b in beats[:20])   # on the clicks
+    assert snap_to_beats([3.2, 2.1], beats) == pytest.approx([3.0, 2.0], abs=0.03)
+
+
+def test_music_mixed_in_and_cuts_on_beats(videos, click_track, tmp_path):
+    _, b = videos                                       # silent source
+    out = str(tmp_path / "m.mp4")
+    o = ReelOptions(size=(320, 240), fps=25, music=click_track, beat_sync=True, duck=False)
+    build_reel([Segment(b, 0.0, 2.2), Segment(b, 3.0, 5.4)], out, options=o)
+    assert _audio_level(out) > -60                      # music audible
+    assert abs(probe(out).duration - 4.5) < 0.15        # 2.2 -> 2.0, 2.4 -> 2.5: cuts land at 2.0 s and 4.5 s
+
+
+def test_replay_and_overlays(videos, tmp_path):
+    a, _ = videos
+    out = str(tmp_path / "r.mp4")
+    seg = Segment(a, 1.0, 4.0, kills=[(2.0, 1), (3.0, 2)], title="Test clip")
+    o = ReelOptions(size=(640, 360), fps=30, overlays=True, titles=True, replay=True, replay_speed=0.5,
+                    replay_before=1.0, replay_after=0.5)
+    build_reel([seg], out, options=o)
+    assert seg.key_kill() == 3.0
+    assert abs(probe(out).duration - (3.0 + 1.5 / 0.5)) < 0.25
+
+
+def test_vertical_and_size_target(videos, tmp_path):
+    a, _ = videos
+    v = str(tmp_path / "v.mp4")
+    build_reel([Segment(a, 0, 3)], v, options=apply_preset("Vertical 9:16 (TikTok / Shorts / Reels)"))
+    assert (probe(v).width, probe(v).height) == (1080, 1920)
+    d = str(tmp_path / "d.mp4")
+    o = apply_preset("Discord (under 25 MB)")
+    o.target_mb = 0.3
+    build_reel([Segment(a, 0, 7)], d, options=o)
+    assert os.path.getsize(d) <= 300_000
+
+
+def test_gif(videos, tmp_path):
+    a, _ = videos
+    g = str(tmp_path / "x.gif")
+    build_reel([Segment(a, 0, 2)], g, options=apply_preset("GIF (small, no sound)"))
+    with open(g, "rb") as f:
+        assert f.read(6) in (b"GIF89a", b"GIF87a")
+
+
+def test_encoder_selection_falls_back():
+    ff = find_ffmpeg()
+    assert pick_encoder(ff, "libx264") == "libx264"
+    assert pick_encoder(ff, "h264_does_not_exist") == "libx264"
+    assert "-crf" in encoder_args("libx264", 20, "fast", None)
+    assert "-b:v" in encoder_args("h264_nvenc", 20, "fast", 2_000_000)

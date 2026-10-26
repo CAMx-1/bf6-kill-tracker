@@ -140,19 +140,29 @@ def cmd_analyze(a: argparse.Namespace) -> int:
                 print(f"  clip: {out}")
 
     if a.reel:
-        from .reel import build_reel, plan_segments
-        items = [(r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}")
-                 for r in results for s in r.streaks]
+        from .reel import PRESETS, ReelOptions, apply_preset, build_reel, plan_segments
+        items = []
+        for r in results:
+            for s in r.streaks:
+                ks = [(k.time, k.count) for k in r.kills if k.streak_id == s.id]
+                items.append((r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}", ks,
+                              os.path.splitext(os.path.basename(r.video))[0]))
         segs = plan_segments(items, {r.video: r.duration for r in results}, a.pad_before, a.pad_after,
                              order=[r.video for r in results])
         if segs:
+            o = apply_preset(a.preset, ReelOptions(encoder=a.encoder))
+            o.music, o.music_volume, o.beat_sync = a.music, a.music_volume, a.beat_sync
+            o.overlays, o.titles, o.replay = a.overlays, a.titles, a.replay
+            if a.max_mb:
+                o.target_mb = a.max_mb
+
             def reel_progress(f: float, msg: str) -> None:
                 if not a.quiet:
                     print(f"\r  highlight video: {f * 100:5.1f}%  {msg[:50]:<50}", end="", file=sys.stderr, flush=True)
-            build_reel(segs, a.reel, progress=reel_progress)
+            build_reel(segs, a.reel, options=o, progress=reel_progress)
             if not a.quiet:
                 print(file=sys.stderr)
-            print(f"\nwrote {a.reel} ({len(segs)} clips, {sum(g.duration for g in segs):.1f}s)")
+            print(f"\nwrote {a.reel} ({len(segs)} clips)")
         else:
             print("\nno streaks found: highlight video not written")
     if a.json:
@@ -212,6 +222,18 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--clips", metavar="DIR", help="export a video clip of every kill streak into DIR")
     an.add_argument("--reel", metavar="FILE.mp4",
                     help="join every streak (from all inputs) into one highlight video")
+    from .reel import PRESETS
+    an.add_argument("--preset", choices=list(PRESETS), default="Custom", help="highlight video export preset")
+    an.add_argument("--music", metavar="FILE", help="background music for the highlight video")
+    an.add_argument("--music-volume", type=float, default=0.8)
+    an.add_argument("--beat-sync", action="store_true", help="cut clips on the music's beats")
+    an.add_argument("--overlays", action="store_true", help="show kill call-outs (DOUBLE KILL, streak count)")
+    an.add_argument("--titles", action="store_true", help="show the video name at the start of each clip")
+    an.add_argument("--replay", action="store_true", help="add a slow-motion replay of each clip's key kill")
+    an.add_argument("--max-mb", type=float, help="keep the highlight video under this many MB")
+    an.add_argument("--encoder", default="auto",
+                    choices=["auto", "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"],
+                    help="video encoder (auto: GPU on Windows when available)")
     an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
     an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
     an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")
