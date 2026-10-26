@@ -29,6 +29,36 @@ import numpy as np
 NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
 
 
+def set_low_priority(on: bool = True) -> None:
+    """Run scanning (this process and every ffmpeg it starts) at low CPU priority,
+    so it never slows down the game. Windows: BELOW_NORMAL priority class; elsewhere: nice 10."""
+    if sys.platform == "win32":
+        flags = subprocess.CREATE_NO_WINDOW | (subprocess.BELOW_NORMAL_PRIORITY_CLASS if on else 0)
+        NO_WINDOW["creationflags"] = flags
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            k32.SetPriorityClass(k32.GetCurrentProcess(), 0x4000 if on else 0x20)
+        except Exception:
+            pass
+    elif on:
+        try:
+            cur = os.nice(0)
+            if cur < 10:
+                os.nice(10 - cur)
+        except OSError:
+            pass
+
+
+def is_low_priority() -> bool:
+    if sys.platform == "win32":
+        return bool(NO_WINDOW.get("creationflags", 0) & getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0))
+    try:
+        return os.nice(0) >= 10
+    except OSError:
+        return False
+
+
 def hwaccel_args() -> List[str]:
     """Hardware video decoding flags (``BF6KT_HWACCEL``: ``auto``, ``none``, or an ffmpeg hwaccel name).
 

@@ -904,6 +904,10 @@ class MainWindow(QMainWindow):
         self.cb_singles.setChecked(self.settings.value("show_singles", "false") == "true")
         self.cb_singles.toggled.connect(self._on_singles_toggled)
         form.addRow("", self.cb_singles)
+        self.cb_lowprio = QCheckBox("Scan at low priority (OK to play while it scans)")
+        self.cb_lowprio.setChecked(self.settings.value("low_priority", "true") == "true")
+        self.cb_lowprio.toggled.connect(lambda on: self.settings.setValue("low_priority", "true" if on else "false"))
+        form.addRow("", self.cb_lowprio)
         self.cb_types = QComboBox()
         self._type_filters = [("All kills", None), ("Headshots only", ["headshot"]),
                               ("Gun kills (incl. headshots)", ["gun", "headshot"]), ("Explosive kills", ["explosive"])]
@@ -1422,6 +1426,9 @@ class MainWindow(QMainWindow):
                 v.status, v.error, v.progress = "Queued", "", 0.0
         self._rebuild_table()
         self._done_count, self._todo_count = 0, len(todo)
+        if self.cb_lowprio.isChecked():
+            from .video import set_low_priority
+            set_low_priority(True)   # (can't be raised again on macOS/Linux without restarting the app)
         w = AnalyzeWorker(todo)
         self._analyze_worker = w
 

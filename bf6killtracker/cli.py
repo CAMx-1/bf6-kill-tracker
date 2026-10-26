@@ -109,6 +109,9 @@ def write_csv(results: List[AnalysisResult], path: str) -> None:
 
 
 def cmd_analyze(a: argparse.Namespace) -> int:
+    if a.low_priority:
+        from .video import set_low_priority
+        set_low_priority(True)
     videos = collect_videos(a.inputs)
     if not videos:
         print("error: no video files given", file=sys.stderr)
@@ -330,6 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="also report the most kills inside any window of this many seconds (default 10)")
     an.add_argument("--streak-type", nargs="+", choices=["headshot", "gun", "explosive", "other"],
                     help="only count these kill types toward streaks, e.g. --streak-type headshot")
+    an.add_argument("--low-priority", action="store_true",
+                    help="scan at low CPU priority (play while it runs in the background)")
     an.add_argument("--rescan", action="store_true", help="ignore remembered results and scan again")
     an.add_argument("--no-feed", action="store_true", help="don't read the kill feed (faster, no deaths/types)")
     an.add_argument("--sample-fps", type=float, default=None,

@@ -43,3 +43,11 @@ def test_every_ffmpeg_call_hides_its_window(tmp_path, monkeypatch):
     expected = NO_WINDOW.get("creationflags", 0)
     assert all(c == expected for c in calls), calls
     assert video_mod.NO_WINDOW is NO_WINDOW
+
+
+def test_low_priority(tmp_path):
+    import subprocess as sp
+    import sys as _s
+    code = "from bf6killtracker.video import set_low_priority, is_low_priority; set_low_priority(); print(is_low_priority())"
+    out = sp.run([_s.executable, "-c", code], capture_output=True, text=True, cwd=str(__import__("pathlib").Path(__file__).parents[1]))
+    assert out.stdout.strip() == "True", out.stderr
