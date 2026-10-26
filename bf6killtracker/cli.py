@@ -1,0 +1,238 @@
+"""Command line interface.
+
+    python -m bf6killtracker analyze VIDEO_OR_FOLDER [...] [options]
+    python -m bf6killtracker calibrate VIDEO --at SECONDS
+    python -m bf6killtracker [gui]          (desktop app)
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import os
+import sys
+from typing import List
+
+from . import __version__
+from .analyzer import AnalysisResult, analyze
+from .detector import HudLayout, SkullDetector
+from .events import TrackerConfig
+
+VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts"}
+
+
+def fmt_time(t: float) -> str:
+    m, s = divmod(max(0.0, t), 60)
+    h, m = divmod(int(m), 60)
+    return f"{h}:{m:02d}:{s:05.2f}" if h else f"{m:d}:{s:05.2f}"
+
+
+def collect_videos(paths: List[str]) -> List[str]:
+    out: List[str] = []
+    for p in paths:
+        if os.path.isdir(p):
+            for name in sorted(os.listdir(p)):
+                if os.path.splitext(name)[1].lower() in VIDEO_EXTS:
+                    out.append(os.path.join(p, name))
+        elif os.path.isfile(p):
+            out.append(p)
+        else:
+            print(f"warning: not found: {p}", file=sys.stderr)
+    return out
+
+
+def safe_stem(path: str) -> str:
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)
+
+
+def print_report(r: AnalysisResult) -> None:
+    print(f"\n{r.video}")
+    print(f"  duration {fmt_time(r.duration)}  |  {r.total_kills} kills  |  "
+          f"{len(r.streaks)} streak(s)  |  processed in {r.processing_s:.1f}s")
+    if r.kills:
+        print("  kills:")
+        for k in r.kills:
+            mult = f" x{k.count}" if k.count > 1 else ""
+            tag = f"  [streak {k.streak_id + 1}]" if k.streak_id >= 0 else ""
+            print(f"    {fmt_time(k.time)}{mult}{tag}")
+    for s in r.streaks:
+        print(f"  STREAK {s.id + 1}: {s.kills} kills in {s.duration:.1f}s  "
+              f"({fmt_time(s.start)} - {fmt_time(s.end)})")
+    if r.kills:
+        print(f"  most kills in any {r.window:g}s window: {r.best_window_kills} "
+              f"(starting {fmt_time(r.best_window_start)})")
+
+
+def write_csv(results: List[AnalysisResult], path: str) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["video", "time_s", "timestamp", "kills", "streak", "evidence"])
+        for r in results:
+            for k in r.kills:
+                w.writerow([r.video, f"{k.time:.3f}", fmt_time(k.time), k.count,
+                            k.streak_id + 1 if k.streak_id >= 0 else "", k.evidence])
+
+
+def cmd_analyze(a: argparse.Namespace) -> int:
+    videos = collect_videos(a.inputs)
+    if not videos:
+        print("error: no video files given", file=sys.stderr)
+        return 2
+    layout = HudLayout().scaled(a.hud_scale) if a.hud_scale != 1.0 else None
+    results: List[AnalysisResult] = []
+    for v in videos:
+        last = [-10.0]
+
+        def progress(t: float, _v=v) -> None:
+            if not a.quiet and t - last[0] >= 5:
+                last[0] = t
+                print(f"\r  scanning {os.path.basename(_v)}: {fmt_time(t)}", end="", file=sys.stderr, flush=True)
+
+        try:
+            r = analyze(v, sample_fps=a.sample_fps, layout=layout, config=TrackerConfig(),
+                        streak_gap=a.streak_gap, streak_min=a.streak_min, window=a.window, progress=progress)
+        except Exception as exc:  # keep going with the remaining files
+            print(f"\nerror: {v}: {exc}", file=sys.stderr)
+            continue
+        if not a.quiet:
+            print("\r" + " " * 70 + "\r", end="", file=sys.stderr)
+        results.append(r)
+        if not a.json_stdout:
+            print_report(r)
+
+        if a.clips:
+            os.makedirs(a.clips, exist_ok=True)
+            from .video import cut_clip
+            jobs = []
+            for s in r.streaks:
+                jobs.append((s.start - a.pad_before, s.end + a.pad_after,
+                             f"{safe_stem(v)}_streak{s.id + 1}_{s.kills}kills.mp4"))
+            if a.clip_every_kill:
+                for i, k in enumerate(r.kills):
+                    jobs.append((k.time - a.pad_before, k.time + a.pad_after,
+                                 f"{safe_stem(v)}_kill{i + 1:03d}_{int(k.time)}s.mp4"))
+            for start, end, name in jobs:
+                out = os.path.join(a.clips, name)
+                cut_clip(v, start, min(end, r.duration or end), out)
+                print(f"  clip: {out}")
+
+    if a.reel:
+        from .reel import build_reel, plan_segments
+        items = [(r.video, s.start, s.end, f"{os.path.basename(r.video)} streak {s.id + 1}")
+                 for r in results for s in r.streaks]
+        segs = plan_segments(items, {r.video: r.duration for r in results}, a.pad_before, a.pad_after,
+                             order=[r.video for r in results])
+        if segs:
+            def reel_progress(f: float, msg: str) -> None:
+                if not a.quiet:
+                    print(f"\r  highlight video: {f * 100:5.1f}%  {msg[:50]:<50}", end="", file=sys.stderr, flush=True)
+            build_reel(segs, a.reel, progress=reel_progress)
+            if not a.quiet:
+                print(file=sys.stderr)
+            print(f"\nwrote {a.reel} ({len(segs)} clips, {sum(g.duration for g in segs):.1f}s)")
+        else:
+            print("\nno streaks found: highlight video not written")
+    if a.json:
+        with open(a.json, "w", encoding="utf-8") as f:
+            json.dump([r.to_dict() for r in results], f, indent=2)
+        print(f"\nwrote {a.json}")
+    if a.json_stdout:
+        print(json.dumps([r.to_dict() for r in results], indent=2))
+    if a.csv:
+        write_csv(results, a.csv)
+        print(f"wrote {a.csv}")
+    return 0 if results else 1
+
+
+def cmd_calibrate(a: argparse.Namespace) -> int:
+    """Save an annotated frame showing where the tracker looks, plus the slot scores."""
+    import cv2
+
+    from .video import grab_frame
+
+    layout = HudLayout().scaled(a.hud_scale) if a.hud_scale != 1.0 else HudLayout()
+    det = SkullDetector(layout)
+    frame = grab_frame(a.video, a.at)
+    ref = cv2.resize(frame, layout.ref_size, interpolation=cv2.INTER_AREA) \
+        if frame.shape[1::-1] != layout.ref_size else frame.copy()
+    x, y, w, h = det.roi
+    obs = det.observe(ref[y:y + h, x:x + w])
+    tw, th = layout.icon_size
+    for k, sx in enumerate(layout.slot_xs()):
+        hit = obs.slot_scores[k] >= TrackerConfig().on_threshold
+        cv2.rectangle(ref, (sx, layout.icon_y), (sx + tw, layout.icon_y + th), (0, 255, 0) if hit else (0, 0, 255), 2)
+        cv2.putText(ref, f"{obs.slot_scores[k]:.2f}", (sx, layout.icon_y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+    px, py, pw, ph = layout.pop_box
+    cv2.rectangle(ref, (px, py), (px + pw, py + ph), (255, 200, 0), 1)
+    bx, by, bw, bh = layout.score_box
+    cv2.rectangle(ref, (bx, by), (bx + bw, by + bh), (200, 200, 200), 1)
+    crop = ref[max(0, y - 150):y + h + 150, max(0, x - 300):x + w + 300]
+    out = a.output or f"calibrate_{safe_stem(a.video)}_{a.at:g}s.png"
+    cv2.imwrite(out, crop)
+    print(f"slot scores (right to left): {[round(float(s), 2) for s in obs.slot_scores]}")
+    print(f"pop score: {obs.pop_score:.2f}")
+    print(f"wrote {out}  (green box = skull detected; boxes should sit on the skull icons)")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="bf6killtracker", description="Track kills and kill streaks in Battlefield 6 videos.")
+    p.add_argument("--version", action="version", version=__version__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    an = sub.add_parser("analyze", help="find kills and kill streaks in videos")
+    an.add_argument("inputs", nargs="+", help="video files and/or folders of videos")
+    an.add_argument("--json", metavar="FILE", help="write results as JSON")
+    an.add_argument("--json-stdout", action="store_true", help="print JSON instead of the text report")
+    an.add_argument("--csv", metavar="FILE", help="write one row per kill as CSV")
+    an.add_argument("--clips", metavar="DIR", help="export a video clip of every kill streak into DIR")
+    an.add_argument("--reel", metavar="FILE.mp4",
+                    help="join every streak (from all inputs) into one highlight video")
+    an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
+    an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
+    an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")
+    an.add_argument("--streak-gap", type=float, default=5.0,
+                    help="max seconds between kills in the same streak (default 5)")
+    an.add_argument("--streak-min", type=int, default=3, help="kills needed to call it a streak (default 3)")
+    an.add_argument("--window", type=float, default=10.0,
+                    help="also report the most kills inside any window of this many seconds (default 10)")
+    an.add_argument("--sample-fps", type=float, default=None,
+                    help="analyse at this frame rate (e.g. 30 for speed); default: the video's own rate")
+    an.add_argument("--hud-scale", type=float, default=1.0, help="in-game HUD scale if not default (e.g. 0.9)")
+    an.add_argument("-q", "--quiet", action="store_true", help="no progress output")
+    an.set_defaults(func=cmd_analyze)
+
+    gu = sub.add_parser("gui", help="open the desktop app (default when run without arguments)")
+    gu.add_argument("videos", nargs="*", help="videos to add on start")
+    gu.set_defaults(func=lambda a: _gui(a.videos))
+
+    ca = sub.add_parser("calibrate", help="save an annotated frame to check the HUD regions line up")
+    ca.add_argument("video")
+    ca.add_argument("--at", type=float, required=True, help="time (s) of a frame that shows a kill skull")
+    ca.add_argument("-o", "--output", help="output PNG path")
+    ca.add_argument("--hud-scale", type=float, default=1.0)
+    ca.set_defaults(func=cmd_calibrate)
+    return p
+
+
+def _gui(videos: List[str]) -> int:
+    try:
+        from .gui import main as gui_main
+    except ImportError as exc:
+        print(f"The GUI needs PySide6: pip install PySide6-Essentials ({exc})", file=sys.stderr)
+        return 1
+    return gui_main(videos)
+
+
+def main(argv: List[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        return _gui([])
+    a = build_parser().parse_args(argv)
+    return a.func(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

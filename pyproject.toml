@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bf6-kill-tracker"
+version = "0.1.0"
+description = "Detect kills and kill streaks in Battlefield 6 gameplay videos from the on-screen kill skull."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24,<3",
+    "opencv-python-headless>=4.8,<5",
+    "imageio-ffmpeg>=0.5,<1",
+    "PySide6-Essentials>=6.5,<7",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+bf6killtracker = "bf6killtracker.cli:main"
+
+[project.gui-scripts]
+bf6killtracker-gui = "bf6killtracker.gui:main"
+
+[tool.setuptools]
+packages = ["bf6killtracker"]
+
+[tool.setuptools.package-data]
+bf6killtracker = ["templates/*.png"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

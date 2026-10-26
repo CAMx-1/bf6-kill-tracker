@@ -1,0 +1,5 @@
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+imageio-ffmpeg==0.5.1
+PySide6-Essentials==6.7.3
+pytest==8.3.3
