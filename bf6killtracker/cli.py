@@ -162,10 +162,13 @@ def cmd_analyze(a: argparse.Namespace) -> int:
         from .reel import PRESETS, ReelOptions, apply_preset, build_reel, caption_for, plan_segments
         items = []
         if a.montage:
-            from .hype import pick_montage, score_result
+            from .hype import MontageSpec, build_montage, music_length, score_result
             cands = [c for r in results for c in score_result(r)]
-            picks = pick_montage(cands, a.montage, a.pad_before, a.pad_after)
-            print(f"\nmontage: {len(picks)} of {len(cands)} clips, best last:")
+            target = music_length(a.music) if a.montage_fit_music and a.music else a.montage
+            spec = MontageSpec(target or 60, a.montage_theme, a.montage_min_hype, a.montage_order,
+                               a.montage_per_video, a.montage_no_repeat_weapon, a.montage_min_kills)
+            picks = build_montage(cands, spec, a.pad_before, a.pad_after)
+            print(f"\nmontage: {len(picks)} of {len(cands)} clips ({a.montage_theme}, {a.montage_order}):")
             for c in picks:
                 print(f"  {c.score:5.1f} {c.stars}  {os.path.basename(c.video)} {fmt_time(c.start)}  "
                       f"({', '.join(c.reasons)})")
@@ -191,6 +194,8 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             o.overlays, o.titles, o.replay = a.overlays or o.overlays, a.titles, a.replay or o.replay
             o.beat_sync = a.beat_sync or o.beat_sync
             o.callout = callout_style_from_args(a, o.callout)
+            if a.montage and a.replay_finale:
+                o.replay, o.replay_finale_only = True, True
             for k in ("transition", "killcam", "intro_text", "intro_sub", "outro_text", "outro_sub",
                       "watermark_text", "watermark_image", "watermark_pos"):
                 if getattr(a, k, None):
@@ -364,6 +369,15 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--denoise", action="store_true", help="reduce background noise in the game/mic audio")
     an.add_argument("--loudnorm", action="store_true", help="even out loudness (YouTube level)")
     an.add_argument("--thumbnail", metavar="FILE.jpg", help="with --reel: also save a YouTube thumbnail")
+    from .hype import ORDERS, THEMES
+    an.add_argument("--montage-theme", choices=list(THEMES), default="Everything")
+    an.add_argument("--montage-order", choices=list(ORDERS), default="Build-up (best last)")
+    an.add_argument("--montage-min-hype", type=float, default=0.0)
+    an.add_argument("--montage-min-kills", type=int, default=1)
+    an.add_argument("--montage-per-video", type=int, default=0, help="max clips from one video (0 = no limit)")
+    an.add_argument("--montage-no-repeat-weapon", action="store_true")
+    an.add_argument("--montage-fit-music", action="store_true", help="montage as long as the --music track")
+    an.add_argument("--replay-finale", action="store_true", help="with --montage: slow-mo replay of the last clip")
     an.add_argument("--clip-every-kill", action="store_true", help="with --clips, also export each kill")
     an.add_argument("--pad-before", type=float, default=4.0, help="seconds of video before a clip (default 4)")
     an.add_argument("--pad-after", type=float, default=3.0, help="seconds of video after a clip (default 3)")

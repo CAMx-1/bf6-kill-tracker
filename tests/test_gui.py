@@ -182,3 +182,27 @@ def test_effects_and_templates(app, video, tmp_path):
     assert w.cb_overlays.isChecked() and w.callout_style.position == "Centre"
     w.preview.shutdown()
     w.close()
+
+
+def test_montage_builder_dialog(app, video, tmp_path):
+    from PySide6.QtCore import QSettings
+    from bf6killtracker.gui import MontageDialog
+    w = MainWindow(QSettings(str(tmp_path / "md.ini"), QSettings.IniFormat))
+    w.add_paths([video])
+    kills = [KillEvent(1, types=["headshot"]), KillEvent(5, count=3), KillEvent(10), KillEvent(11), KillEvent(12),
+             KillEvent(17, types=["headshot"])]
+    w.videos[0].result = AnalysisResult(video, 20.0, 30.0, kills, [], 0, 0.0, 10.0, feed_used=True)
+    w.videos[0].status = "Done"
+    w.sp_gap.setValue(2.0)
+    d = MontageDialog(w)
+    d.cb_theme.setCurrentText("Headshots")
+    assert {round(c.start) for _, c, _ in d.picks} == {1, 17}
+    d.cb_theme.setCurrentText("Everything")
+    d.cb_order.setCurrentText("Chronological")
+    starts = [c.start for _, c, _ in d.picks]
+    assert starts == sorted(starts)
+    d._use()
+    assert [k for _, k in w.reel_order] == [c.key for _, c, _ in d.picks]
+    assert w.cb_replay.isChecked() and w.effects["replay_finale_only"]
+    w.preview.shutdown()
+    w.close()

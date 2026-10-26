@@ -464,7 +464,153 @@ class CalloutDialog(QDialog):
 EFFECT_DEFAULTS = dict(template="", transition="fade", transition_s=0.35, killcam="none", captions=False,
                        intro_text="", intro_sub="", outro_text="", outro_sub="", card_s=2.5,
                        watermark_text="", watermark_image="", watermark_pos="Top right", watermark_opacity=0.7,
-                       audio_track=0, denoise=False, loudnorm=False, thumbnail=False)
+                       audio_track=0, denoise=False, loudnorm=False, thumbnail=False, replay_finale_only=False)
+
+
+class MontageDialog(QDialog):
+    """Montage builder: length (or fit the song), theme, ordering, variety rules and a live pick list."""
+
+    def __init__(self, parent: "MainWindow"):
+        super().__init__(parent)
+        from .hype import ORDERS, THEMES, MontageSpec
+        self.mw = parent
+        self.setWindowTitle("Montage builder")
+        self.resize(900, 600)
+        lay = QHBoxLayout(self)
+        form = QFormLayout()
+        lay.addLayout(form)
+        st = parent.settings
+        self.sp_len = QSpinBox()
+        self.sp_len.setRange(5, 1800)
+        self.sp_len.setSuffix(" s")
+        self.sp_len.setValue(int(st.value("montage_len", 60)))
+        self.cb_fit = QCheckBox("Fit the length to the music")
+        self.cb_fit.setEnabled(bool(parent.ed_music.text()))
+        self.cb_fit.setToolTip("Uses the song chosen under Music" if parent.ed_music.text()
+                               else "Choose music in the main window first")
+        self.cb_theme = QComboBox()
+        self.cb_theme.addItems(list(THEMES))
+        self.cb_theme.setCurrentText(str(st.value("montage_theme", "Everything")))
+        self.cb_order = QComboBox()
+        self.cb_order.addItems(list(ORDERS))
+        self.cb_order.setCurrentText(str(st.value("montage_order", "Build-up (best last)")))
+        self.sp_min = QSpinBox()
+        self.sp_min.setRange(0, 200)
+        self.sp_min.setValue(int(st.value("montage_min", 0)))
+        self.sp_min.setToolTip("Leave out clips below this hype score")
+        self.sp_kills = QSpinBox()
+        self.sp_kills.setRange(1, 20)
+        self.sp_kills.setValue(int(st.value("montage_kills", 1)))
+        self.sp_kills.setSuffix(" kill(s) per clip")
+        self.sp_pervid = QSpinBox()
+        self.sp_pervid.setRange(0, 50)
+        self.sp_pervid.setSpecialValueText("no limit")
+        self.sp_pervid.setValue(int(st.value("montage_pervid", 0)))
+        self.cb_weapon = QCheckBox("Don't use the same weapon twice in a row")
+        self.cb_weapon.setChecked(st.value("montage_weapon", "false") == "true")
+        self.cb_finale = QCheckBox("Slow-mo replay of the finale only")
+        self.cb_finale.setChecked(st.value("montage_finale", "true") == "true")
+        self.cb_beat = QCheckBox("Cut on the beat (needs music)")
+        self.cb_beat.setChecked(parent.cb_beat.isChecked() or bool(parent.ed_music.text()))
+        self.cb_beat.setEnabled(bool(parent.ed_music.text()))
+        self.sp_seed = QSpinBox()
+        self.sp_seed.setRange(0, 9999)
+        self.sp_seed.setPrefix("shuffle #")
+        form.addRow("Length", self.sp_len)
+        form.addRow("", self.cb_fit)
+        form.addRow("Theme", self.cb_theme)
+        form.addRow("Order", self.cb_order)
+        form.addRow("", self.sp_seed)
+        form.addRow("Minimum hype", self.sp_min)
+        form.addRow("At least", self.sp_kills)
+        form.addRow("Max clips per video", self.sp_pervid)
+        form.addRow("", self.cb_weapon)
+        form.addRow("", self.cb_finale)
+        form.addRow("", self.cb_beat)
+        vers = QHBoxLayout()
+        self.cb_vers = {}
+        for n in (15, 30, 60):
+            cb = QCheckBox(f"{n}s")
+            self.cb_vers[n] = cb
+            vers.addWidget(cb)
+        vers.addStretch(1)
+        form.addRow("Also export", vers)
+        right = QVBoxLayout()
+        lay.addLayout(right, 1)
+        self.lbl = QLabel()
+        right.addWidget(self.lbl)
+        self.list = QListWidget()
+        right.addWidget(self.list, 1)
+        btns = QHBoxLayout()
+        b_use = QPushButton("Use this montage")
+        b_use.setToolTip("Ticks these clips in this order (then press Build highlight video)")
+        b_use.clicked.connect(self._use)
+        b_build = QPushButton("Build now…")
+        b_build.setDefault(True)
+        b_build.clicked.connect(self._build)
+        b_cancel = QPushButton("Cancel")
+        b_cancel.clicked.connect(self.reject)
+        btns.addStretch(1)
+        btns.addWidget(b_cancel)
+        btns.addWidget(b_use)
+        btns.addWidget(b_build)
+        right.addLayout(btns)
+        for w in (self.sp_len, self.sp_min, self.sp_kills, self.sp_pervid, self.sp_seed):
+            w.valueChanged.connect(self._refresh)
+        for w in (self.cb_theme, self.cb_order):
+            w.currentIndexChanged.connect(self._refresh)
+        for w in (self.cb_fit, self.cb_weapon):
+            w.toggled.connect(self._refresh)
+        self.build_requested = False
+        self._refresh()
+
+    def spec(self, target: Optional[float] = None):
+        from .hype import MontageSpec, music_length
+        t = target or self.sp_len.value()
+        if target is None and self.cb_fit.isChecked() and self.mw.ed_music.text():
+            ml = music_length(self.mw.ed_music.text())
+            if ml > 0:
+                t = ml
+        return MontageSpec(t, self.cb_theme.currentText(), self.sp_min.value(), self.cb_order.currentText(),
+                           self.sp_pervid.value(), self.cb_weapon.isChecked(), self.sp_kills.value(),
+                           self.sp_seed.value())
+
+    def _refresh(self, *_):
+        self.sp_seed.setVisible(self.cb_order.currentText() == "Shuffle")
+        self.sp_len.setEnabled(not self.cb_fit.isChecked())
+        picks = self.mw.montage_picks(self.spec())
+        self.picks = picks
+        self.list.clear()
+        total = 0.0
+        pre, post = self.mw.sp_pre.value(), self.mw.sp_post.value()
+        for i, (v, c, s) in enumerate(picks):
+            total += c.end - c.start + pre + post
+            self.list.addItem(f"{i + 1}.  {s.score:5.0f} {s.stars}  {v.name} {fmt_time(c.start)} — {c.title} "
+                              f"({', '.join(s.reasons)})")
+        spec = self.spec()
+        self.lbl.setText(f"<b>{len(picks)} clips, about {fmt_time(total)}</b> (target {fmt_time(spec.target_s)})"
+                         + ("" if picks else " — nothing matches; loosen the filters"))
+
+    def _save_settings(self) -> None:
+        st = self.mw.settings
+        for k, v in (("montage_len", self.sp_len.value()), ("montage_theme", self.cb_theme.currentText()),
+                     ("montage_order", self.cb_order.currentText()), ("montage_min", self.sp_min.value()),
+                     ("montage_kills", self.sp_kills.value()), ("montage_pervid", self.sp_pervid.value()),
+                     ("montage_weapon", "true" if self.cb_weapon.isChecked() else "false"),
+                     ("montage_finale", "true" if self.cb_finale.isChecked() else "false")):
+            st.setValue(k, v)
+
+    def _use(self) -> None:
+        self._save_settings()
+        self.mw.apply_montage(self.picks, self.cb_finale.isChecked(), self.cb_beat.isChecked())
+        self.accept()
+
+    def _build(self) -> None:
+        self._use()
+        self.build_requested = True
+
+    def extra_versions(self):
+        return [n for n, cb in self.cb_vers.items() if cb.isChecked()]
 
 
 class EffectsDialog(QDialog):
@@ -1722,14 +1868,66 @@ class MainWindow(QMainWindow):
         return score_clip(c.events, v.result.events if v.result else [], c.start, c.end)
 
     def make_montage_dialog(self) -> None:
-        from PySide6.QtWidgets import QInputDialog
-        secs, ok = QInputDialog.getInt(self, "Make montage", "Target length (seconds):",
-                                       int(self.settings.value("montage_len", 60)), 10, 1800, 5)
-        if ok:
-            self.settings.setValue("montage_len", secs)
-            self.make_montage(secs)
+        if not any(v.result for v in self.videos):
+            QMessageBox.information(self, APP_NAME, "Scan a video first.")
+            return
+        dlg = MontageDialog(self)
+        if not dlg.exec():
+            return
+        extra = dlg.extra_versions()
+        if dlg.build_requested or extra:
+            self.build_reel_dialog()
+            out = getattr(self, "_last_reel_target", None)
+            if out and extra:
+                self._pending_versions = [(n, dlg.spec(float(n)), dlg.cb_finale.isChecked()) for n in extra]
+
+    def _candidates(self):
+        from .hype import Scored
+        out = []
+        for v in self.videos:
+            if not v.result:
+                continue
+            for c in v.clips(True):
+                sc, why = self._hype(v, c)
+                types = [t for k in c.events for t in k.type_list()]
+                weapons = [w for k in c.events for w in k.weapons]
+                s = Scored(v.path, c.key, c.start, c.end, c.kills, sc, why,
+                           [(k.time, k.count) for k in c.events], "", types, weapons)
+                out.append((v, c, s))
+        return out
+
+    def montage_picks(self, spec):
+        """[(video entry, clip, Scored)] chosen by ``spec``."""
+        from .hype import build_montage
+        cands = self._candidates()
+        by = {(s.video, s.key): (v, c) for v, c, s in cands}
+        picks = build_montage([s for _, _, s in cands], spec, self.sp_pre.value(), self.sp_post.value())
+        return [(*by[(s.video, s.key)], s) for s in picks]
+
+    def apply_montage(self, picks, finale_replay: bool = True, beat: bool = False) -> None:
+        if not self.cb_singles.isChecked():
+            self.cb_singles.setChecked(True)
+        chosen = {(v.path, c.key) for v, c, _ in picks}
+        for v in self.videos:
+            for c in v.clips(True):
+                v.selected[c.key] = (v.path, c.key) in chosen
+        self.reel_order = [(v.path, c.key) for v, c, _ in picks]
+        self.cb_replay.setChecked(finale_replay)
+        self.effects["replay_finale_only"] = finale_replay
+        if beat and self.ed_music.text():
+            self.cb_beat.setChecked(True)
+        self._rebuild_tree()
+        self.tabs.setCurrentIndex(1)
+        total = sum(g.duration for g in self._segments())
+        self.status.setText(f"Montage: {len(picks)} clips, {fmt_time(total)}. Press “Build highlight video…”.")
 
     def make_montage(self, seconds: float) -> None:
+        """Quick montage: best clips for ``seconds``, build-up order (see the Montage builder for options)."""
+        from .hype import MontageSpec
+        self.apply_montage(self.montage_picks(MontageSpec(seconds)), True)
+        return
+
+    def _make_montage_old(self, seconds: float) -> None:
         """Tick the highest-hype clips that fit ``seconds`` and order them for build-up."""
         from .hype import Scored, pick_montage
         if not self.cb_singles.isChecked():
@@ -2101,6 +2299,7 @@ class MainWindow(QMainWindow):
         if not out.lower().endswith(ext):
             out += ext
         self.settings.setValue("reel_dir", os.path.dirname(out))
+        self._last_reel_target = out
         self.start_reel(out)
 
     def start_reel(self, out: str) -> None:
@@ -2133,6 +2332,14 @@ class MainWindow(QMainWindow):
         self.settings.setValue("open_after", "true" if self.cb_open.isChecked() else "false")
         self._refresh_buttons()
         self.last_reel = path
+        pend = getattr(self, "_pending_versions", None)
+        if pend:
+            n, spec, finale = pend.pop(0)
+            if not pend:
+                self._pending_versions = None
+            self.apply_montage(self.montage_picks(spec), finale)
+            QTimer.singleShot(200, lambda p=path, n=n: self.start_reel(os.path.splitext(p)[0] + f"_{n}s"
+                                                                       + os.path.splitext(p)[1]))
         if self.effects.get("thumbnail") and not path.lower().endswith(".gif"):
             try:
                 self.save_thumbnail(os.path.splitext(path)[0] + "_thumbnail.jpg")

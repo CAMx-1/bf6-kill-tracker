@@ -268,3 +268,52 @@ def test_thumbnail(videos, tmp_path):
     a, _ = videos
     p = make_thumbnail(a, 1.0, str(tmp_path / "t.jpg"), "5 KILL STREAK", "clutch")
     assert Image.open(p).size == (1280, 720)
+
+
+from bf6killtracker.hype import MontageSpec, build_montage  # noqa: E402
+
+
+def _pool():
+    mk = lambda v, k, s, n, sc, types, w, reasons=(): Scored(v, k, s, s + 2, n, sc, list(reasons),  # noqa: E731
+                                                              [(s, 1)] * n, "", types, w)
+    return [mk("a", "1", 0, 1, 20, ["headshot"], ["gun_rifle"]), mk("a", "2", 10, 3, 80, ["gun"] * 3, ["gun_rifle"] * 3),
+            mk("b", "3", 0, 1, 15, ["explosive"], ["explosive_c4"]), mk("b", "4", 10, 2, 60, ["headshot", "gun"],
+                                                                         ["gun_rifle", "gun_rifle"]),
+            mk("b", "5", 20, 5, 95, ["gun"] * 5, ["gun_smg"] * 5, ["last squad member alive"])]
+
+
+def test_montage_themes_and_limits():
+    p = _pool()
+    assert {c.key for c in build_montage(p, MontageSpec(100, "Headshots"), 1, 1)} == {"1", "4"}
+    assert [c.key for c in build_montage(p, MontageSpec(100, "Clutch moments"), 1, 1)] == ["5"]
+    assert {c.key for c in build_montage(p, MontageSpec(100, "Explosives"), 1, 1)} == {"3"}
+    one = build_montage(p, MontageSpec(100, max_per_video=1), 1, 1)
+    assert sorted(c.video for c in one) == ["a", "b"]
+    assert all(c.score >= 50 for c in build_montage(p, MontageSpec(100, min_score=50), 1, 1))
+
+
+def test_montage_orders():
+    p = _pool()
+    assert [c.score for c in build_montage(p, MontageSpec(100, order="Best first"), 1, 1)] == [95, 80, 60, 20, 15]
+    alt = [c.score for c in build_montage(p, MontageSpec(100, order="Alternate big and small"), 1, 1)]
+    assert alt == [95, 15, 80, 20, 60]
+    chrono = build_montage(p, MontageSpec(100, order="Chronological"), 1, 1)
+    assert [(c.video, c.start) for c in chrono] == sorted((c.video, c.start) for c in chrono)
+    s1 = [c.key for c in build_montage(p, MontageSpec(100, order="Shuffle", seed=1), 1, 1)]
+    assert sorted(s1) == ["1", "2", "3", "4", "5"]
+    def repeats(cs):
+        return sum(1 for x, y in zip(cs, cs[1:]) if x.main_weapon() and x.main_weapon() == y.main_weapon())
+    from bf6killtracker.hype import _spread_weapons
+    w = lambda k, wp: Scored("v", k, 0, 1, 1, 1, [], [], "", ["gun"], [wp])  # noqa: E731
+    seq = [w("1", "gun_rifle"), w("2", "gun_rifle"), w("3", "gun_smg"), w("4", "gun_smg"), w("5", "gun_rifle")]
+    out = _spread_weapons(seq)
+    assert repeats(seq) == 2 and repeats(out) == 0 and out[-1].key == "5"
+
+
+def test_replay_finale_only(videos, tmp_path):
+    a, _ = videos
+    out = str(tmp_path / "f.mp4")
+    segs = [Segment(a, 0, 2, kills=[(1, 1)]), Segment(a, 3, 5, kills=[(4, 1)])]
+    build_reel(segs, out, options=ReelOptions(size=(320, 180), fps=25, replay=True, replay_finale_only=True,
+                                              replay_before=0.5, replay_after=0.5, replay_speed=0.5))
+    assert abs(probe(out).duration - (4 + 1.0 / 0.5)) < 0.3          # one replay only

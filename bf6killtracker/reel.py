@@ -75,6 +75,7 @@ class ReelOptions:
     replay_speed: float = 0.5
     replay_before: float = 1.2
     replay_after: float = 0.8
+    replay_finale_only: bool = False            # one replay, of the last clip (the montage's best moment)
     # transitions between clips: "fade" (dip to black), "cut", "crossfade", "whip", "zoom"
     transition: str = "fade"
     transition_s: float = 0.35
@@ -303,9 +304,10 @@ class _Part:
 
 def _plan_parts(segments: Sequence[Segment], o: ReelOptions, infos) -> List[_Part]:
     parts: List[_Part] = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         parts.append(_Part(seg, seg.start, seg.duration))
-        k = seg.key_kill() if o.replay else None
+        want = o.replay and (not o.replay_finale_only or i == len(segments) - 1)
+        k = seg.key_kill() if want else None
         if k is not None:
             a = max(0.0, k - o.replay_before)
             b = min(infos[seg.video].duration or k + o.replay_after, k + o.replay_after)
