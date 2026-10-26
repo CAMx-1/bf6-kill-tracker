@@ -13,7 +13,7 @@ import numpy as np
 from .detector import FrameObservation, HudLayout, SkullDetector
 from .events import (KillEvent, KillTracker, Life, Streak, TrackerConfig, find_streaks, fuse_feed,
                      max_kills_in_window, split_lives)
-from .killfeed import FeedEvent, FeedReader, FeedTracker
+from .killfeed import FEED_ROI, FeedEvent, FeedReader, FeedTracker
 from .video import probe, read_multi_roi_frames, read_roi_frames
 
 
@@ -37,6 +37,7 @@ class AnalysisResult:
     feed: List[FeedEvent] = field(default_factory=list)
     lives: List[Life] = field(default_factory=list)
     feed_used: bool = False
+    hud: str = ""            # how the HUD layout was chosen (auto-calibration summary)
 
     @property
     def total_kills(self) -> int:
@@ -74,6 +75,7 @@ class AnalysisResult:
             "kill_types": self.type_counts(),
             "lives": [lf.to_dict() for lf in self.lives],
             "most_kills_in_one_life": self.best_life,
+            "hud": self.hud,
             "processing_s": round(self.processing_s, 1),
         }
 
@@ -90,14 +92,25 @@ def scan_observations(path: str, detector: SkullDetector, sample_fps: Optional[f
 def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[HudLayout] = None,
             config: Optional[TrackerConfig] = None, streak_gap: float = 5.0, streak_min: int = 3,
             window: float = 10.0, progress: Optional[Callable[[float], None]] = None,
-            use_feed: bool = True, feed_fps: float = 10.0) -> AnalysisResult:
+            use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True) -> AnalysisResult:
     started = time.time()
     info = probe(path)
     fps = sample_fps or info.fps
+    calibration = None
+    if layout is None:
+        if auto_calibrate:
+            from .calibrate import calibrate
+            calibration = calibrate(path)
+            layout = calibration.layout
+        else:
+            layout = HudLayout.for_video(info.width, info.height)
     det = SkullDetector(layout)
     tracker = KillTracker(fps, config)
     feed_events: List[FeedEvent] = []
-    reader = FeedReader() if use_feed else None
+    # the kill feed is anchored to the top-right corner of the screen
+    fx, fy, fw, fh = FEED_ROI
+    feed_roi = (fx + det.layout.ref_size[0] - 2560, fy, fw, fh)
+    reader = FeedReader(feed_roi) if use_feed else None
     every = max(1, int(round(fps / feed_fps)))
     ft = FeedTracker(every / fps)
     rois = [det.roi] + ([reader.roi] if reader else [])
@@ -136,4 +149,5 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
     best, best_t = max_kills_in_window(kills, window)
     return AnalysisResult(path, info.duration, fps, kills, streaks, best, best_t, window,
                           time.time() - started, tracker.counts, deaths, feed_events,
-                          split_lives(kills, deaths, info.duration), use_feed)
+                          split_lives(kills, deaths, info.duration), use_feed,
+                          calibration.describe() if calibration else "manual HUD layout")

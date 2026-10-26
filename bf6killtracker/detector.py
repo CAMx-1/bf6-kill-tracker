@@ -67,6 +67,28 @@ class HudLayout:
         y1 = max(self.icon_y + th, py + ph + POP_PAD, by + bh) + self.tol
         return x0, y0, x1 - x0, y1 - y0
 
+    def shifted(self, dx: int, dy: int) -> "HudLayout":
+        def box(b):
+            return (b[0] + dx, b[1] + dy, b[2], b[3])
+
+        return HudLayout(ref_size=self.ref_size, slot0_x=self.slot0_x + dx, slot_pitch=self.slot_pitch,
+                         num_slots=self.num_slots, icon_y=self.icon_y + dy, icon_size=self.icon_size,
+                         tol=self.tol, pop_box=box(self.pop_box), score_box=box(self.score_box))
+
+    @classmethod
+    def for_video(cls, width: int, height: int) -> "HudLayout":
+        """Default layout for a recording of this size.
+
+        Everything is scaled to 1440 lines. Wider-than-16:9 recordings (ultrawide)
+        keep their aspect ratio; the kill notification stays centred on the crosshair.
+        """
+        base = cls()
+        if not width or not height or abs(width / height - 16 / 9) < 0.01:
+            return base
+        rw = int(round(1440 * width / height / 2)) * 2
+        out = HudLayout(**{**base.__dict__, "ref_size": (rw, 1440)})
+        return out.shifted((rw - 2560) // 2, 0)
+
     def scaled(self, s: float) -> "HudLayout":
         """Layout for a non-default in-game HUD scale (scales around screen centre)."""
         cx, cy = self.ref_size[0] / 2, self.ref_size[1] / 2

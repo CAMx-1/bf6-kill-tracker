@@ -51,6 +51,8 @@ def print_report(r: AnalysisResult) -> None:
     deaths = f"  |  {len(r.deaths)} death(s), K/D {r.kd:.1f}" if r.feed_used else ""
     print(f"  duration {fmt_time(r.duration)}  |  {r.total_kills} kills{deaths}  |  "
           f"{len(r.streaks)} streak(s)  |  processed in {r.processing_s:.1f}s")
+    if r.hud:
+        print(f"  {r.hud}")
     if r.feed_used and r.kills:
         tc = r.type_counts()
         print("  kill types: " + ", ".join(f"{n} {t}" for t, n in sorted(tc.items(), key=lambda x: -x[1])))
