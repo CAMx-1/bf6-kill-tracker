@@ -39,6 +39,7 @@ class AnalysisResult:
     feed_used: bool = False
     hud: str = ""            # how the HUD layout was chosen (auto-calibration summary)
     from_cache: bool = False  # loaded from a remembered scan instead of scanning
+    reviewed: bool = False    # your corrections from review mode were applied
     events: List["HudEvent"] = field(default_factory=list)   # medals, spots, revives, squad wipes...
     down: List["DownPeriod"] = field(default_factory=list)   # "MAN DOWN" screens (time spent down)
     scoreboards: List["Scoreboard"] = field(default_factory=list)  # your row each time the scoreboard showed
@@ -111,7 +112,8 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
             window: float = 10.0, progress: Optional[Callable[[float], None]] = None,
             use_feed: bool = True, feed_fps: float = 10.0, auto_calibrate: bool = True,
             use_cache: bool = False, use_labels: bool = True, label_fps: float = 5.0,
-            use_screens: bool = True, screen_fps: float = 2.0, refresh: bool = False) -> AnalysisResult:
+            use_screens: bool = True, screen_fps: float = 2.0, refresh: bool = False,
+            apply_review: bool = True) -> AnalysisResult:
     """Scan ``path`` for kills, deaths and streaks.
 
     With ``use_cache`` a previous scan of the unchanged file (same detection
@@ -133,6 +135,9 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
             r.from_cache = True
             r.events = hit.get("events", [])
             r.down, r.scoreboards = hit.get("down", []), hit.get("scoreboards", [])
+            if apply_review:
+                from .review import apply
+                apply(r, streak_gap=streak_gap, streak_min=streak_min)
             return r
     info = probe(path)
     fps = sample_fps or info.fps
@@ -254,4 +259,7 @@ def analyze(path: str, *, sample_fps: Optional[float] = None, layout: Optional[H
     if use_cache:
         from . import cache
         cache.save(result, cache_opts)
+    if apply_review:
+        from .review import apply
+        apply(result, streak_gap=streak_gap, streak_min=streak_min)
     return result

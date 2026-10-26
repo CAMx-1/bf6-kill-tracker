@@ -53,7 +53,7 @@ def print_report(r: AnalysisResult) -> None:
           f"{len(r.streaks)} streak(s)  |  " +
           ("remembered from an earlier scan" if r.from_cache else f"processed in {r.processing_s:.1f}s"))
     if r.hud:
-        print(f"  {r.hud}")
+        print(f"  {r.hud}" + ("  |  your review corrections applied" if r.reviewed else ""))
     if r.feed_used and r.kills:
         tc = r.type_counts()
         print("  kill types: " + ", ".join(f"{n} {t}" for t, n in sorted(tc.items(), key=lambda x: -x[1])))

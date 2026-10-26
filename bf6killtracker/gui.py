@@ -460,6 +460,213 @@ class CalloutDialog(QDialog):
         return self.style_
 
 
+class ReviewDialog(QDialog):
+    """Check every detection: ✓ correct, ✗ not a kill, fix the count, or add a missed kill/death.
+
+    Click a row to see it in the preview player. Corrections are saved per video and
+    applied to every future scan.
+    """
+
+    def __init__(self, parent, entry: "VideoEntry"):
+        super().__init__(parent)
+        from . import review
+        self.entry = entry
+        self.rv = review.load(entry.path)
+        self.setWindowTitle(f"Review — {entry.name}")
+        self.resize(1100, 640)
+        lay = QHBoxLayout(self)
+        left = QVBoxLayout()
+        lay.addLayout(left, 1)
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Time", "Event", "Detected by", "Count", "Your verdict"])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.currentCellChanged.connect(lambda r, *_: self._show(r))
+        left.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        for text, fn, key in (("✓ Correct", self.mark_ok, "C"), ("✗ Not a kill", self.mark_bad, "X"),
+                              ("Count −", lambda: self.change_count(-1), "-"),
+                              ("Count +", lambda: self.change_count(1), "+")):
+            b = QPushButton(text)
+            b.setShortcut(QKeySequence(key))
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        row.addStretch(1)
+        left.addLayout(row)
+        row2 = QHBoxLayout()
+        b_add = QPushButton("+ Missed kill at preview time")
+        b_add.clicked.connect(lambda: self.add_at_playhead("kill"))
+        b_addd = QPushButton("+ Missed death at preview time")
+        b_addd.clicked.connect(lambda: self.add_at_playhead("death"))
+        self.lbl = QLabel()
+        row2.addWidget(b_add)
+        row2.addWidget(b_addd)
+        row2.addStretch(1)
+        row2.addWidget(self.lbl)
+        left.addLayout(row2)
+        right = QVBoxLayout()
+        lay.addLayout(right)
+        self.player = PreviewPlayer()
+        right.addWidget(self.player)
+        right.addWidget(QLabel("Shortcuts: C correct · X not a kill · +/− count · arrows move"))
+        right.addStretch(1)
+        b_close = QPushButton("Done")
+        b_close.clicked.connect(self.accept)
+        right.addWidget(b_close)
+        self._raw = None
+        self._load_rows()
+
+    def _load_rows(self) -> None:
+        from . import analyze
+        try:   # the raw detections (without earlier corrections), from the remembered scan
+            self._raw = analyze(self.entry.path, use_cache=True, apply_review=False)
+        except Exception:
+            self._raw = self.entry.result
+        r = self._raw
+        hints = []
+        try:
+            from .audio import intensity, missed_kill_hints
+            hints = missed_kill_hints(intensity(self.entry.path), [k.time for k in r.kills])
+        except Exception:
+            pass
+        rows = [(k.time, "kill", k) for k in r.kills] + [(d, "death", None) for d in r.deaths]
+        rows += [(a["time"], "added kill", a) for a in self.rv.added]
+        rows += [(d, "added death", None) for d in self.rv.added_deaths]
+        rows += [(h, "hint", None) for h in hints if not any(abs(h - x[0]) < 2 for x in rows)]
+        rows.sort(key=lambda x: x[0])
+        self.rows = rows
+        self.table.setRowCount(len(rows))
+        for i, (t, kind, obj) in enumerate(rows):
+            self._fill(i)
+        self._summary()
+
+    def _verdict(self, t: float, kind: str) -> str:
+        from .review import _near
+        if kind == "kill":
+            if _near(t, self.rv.rejected):
+                return "✗ not a kill"
+            if _near(t, self.rv.confirmed):
+                return "✓ correct"
+        if kind == "death" and _near(t, self.rv.rejected_deaths):
+            return "✗ not a death"
+        if kind.startswith("added"):
+            return "added by you"
+        return ""
+
+    def _fill(self, i: int) -> None:
+        t, kind, obj = self.rows[i]
+        if kind == "kill":
+            n = self.rv.counts.get(f"{t:.3f}", obj.count)
+            types = ", ".join(x for x in obj.type_list() if x != "unknown")
+            ev, by, cnt = f"Kill ({types})" if types else "Kill", obj.evidence or "skull", str(n)
+        elif kind == "death":
+            ev, by, cnt = "Death", "kill feed / MAN DOWN", ""
+        elif kind == "added kill":
+            ev, by, cnt = "Kill", "you", str(obj.get("count", 1))
+        elif kind == "added death":
+            ev, by, cnt = "Death", "you", ""
+        else:
+            ev, by, cnt = "Possible missed kill? (gunfire, no kill detected)", "audio", ""
+        for c, val in enumerate([fmt_time(t), ev, by, cnt, self._verdict(t, kind)]):
+            it = QTableWidgetItem(val)
+            if kind == "hint":
+                it.setForeground(QColor("#888"))
+            self.table.setItem(i, c, it)
+
+    def _summary(self) -> None:
+        from .review import accuracy
+        if self._raw is not None and not self.rv.is_empty():
+            a = accuracy(self._raw, self.rv)
+            self.lbl.setText(f"detector vs your review: {a['false']} false, {a['missed']} missed")
+        else:
+            self.lbl.setText("No corrections yet")
+
+    def _show(self, r: int) -> None:
+        if 0 <= r < len(self.rows):
+            t = self.rows[r][0]
+            self.player.load(self.entry.path, max(0.0, t - 2.5), t + 2.0, autoplay=True)
+
+    def _cur(self):
+        r = self.table.currentRow()
+        return (r, *self.rows[r]) if 0 <= r < len(self.rows) else (None, None, None, None)
+
+    def _save(self, r: int) -> None:
+        from . import review
+        review.save(self.rv)
+        self._fill(r)
+        self._summary()
+        if r + 1 < self.table.rowCount():
+            self.table.setCurrentCell(r + 1, 0)
+
+    def _drop(self, lst, t):
+        lst[:] = [x for x in lst if abs(x - t) > 0.6]
+
+    def mark_ok(self) -> None:
+        r, t, kind, obj = self._cur()
+        if r is None:
+            return
+        if kind == "kill":
+            self._drop(self.rv.rejected, t)
+            self._drop(self.rv.confirmed, t)
+            self.rv.confirmed.append(round(t, 3))
+        elif kind == "death":
+            self._drop(self.rv.rejected_deaths, t)
+        elif kind == "hint":
+            self.rv.added.append({"time": round(t - 0.5, 3), "count": 1})
+            self.rows[r] = (t - 0.5, "added kill", self.rv.added[-1])
+        self._save(r)
+
+    def mark_bad(self) -> None:
+        r, t, kind, obj = self._cur()
+        if r is None:
+            return
+        if kind == "kill":
+            self._drop(self.rv.confirmed, t)
+            self._drop(self.rv.rejected, t)
+            self.rv.rejected.append(round(t, 3))
+        elif kind == "death":
+            self._drop(self.rv.rejected_deaths, t)
+            self.rv.rejected_deaths.append(round(t, 3))
+        elif kind == "added kill":
+            self.rv.added = [a for a in self.rv.added if a is not obj]
+        elif kind == "added death":
+            self._drop(self.rv.added_deaths, t)
+        self._save(r)
+
+    def change_count(self, d: int) -> None:
+        r, t, kind, obj = self._cur()
+        if kind == "kill":
+            n = max(1, self.rv.counts.get(f"{t:.3f}", obj.count) + d)
+            if n == obj.count:
+                self.rv.counts.pop(f"{t:.3f}", None)
+            else:
+                self.rv.counts[f"{t:.3f}"] = n
+            self._save(r)
+            self.table.setCurrentCell(r, 0)
+        elif kind == "added kill":
+            obj["count"] = max(1, int(obj.get("count", 1)) + d)
+            self._save(r)
+            self.table.setCurrentCell(r, 0)
+
+    def add_at_playhead(self, what: str) -> None:
+        if not self.player.path:
+            return
+        t = round(self.player.start + self.player.pos, 2)
+        if what == "kill":
+            self.rv.added.append({"time": t, "count": 1})
+        else:
+            self.rv.added_deaths.append(t)
+        from . import review
+        review.save(self.rv)
+        self._load_rows()
+
+    def done(self, r) -> None:  # noqa: D401 - Qt override
+        self.player.shutdown()
+        super().done(r)
+
+
 class PlayersDialog(QDialog):
     """Opponents grouped by name across the loaded videos (names shown as they appeared in the kill feed)."""
 
@@ -645,6 +852,9 @@ class MainWindow(QMainWindow):
         self.act_markers = QAction(st.standardIcon(QStyle.SP_FileDialogListView), "Export markers…", self)
         self.act_markers.setToolTip("Write kill/streak markers for Premiere, Resolve, Final Cut, or YouTube chapters")
         self.act_markers.triggered.connect(self.export_markers_dialog)
+        self.act_review = QAction(st.standardIcon(QStyle.SP_DialogApplyButton), "Review…", self)
+        self.act_review.setToolTip("Check each detected kill/death for the selected video and fix mistakes")
+        self.act_review.triggered.connect(self.review_selected)
         self.act_players = QAction(st.standardIcon(QStyle.SP_DirHomeIcon), "Players", self)
         self.act_players.setToolTip("Opponents you killed most / who killed you, from the kill feed")
         self.act_players.triggered.connect(lambda: PlayersDialog(self, self.videos).exec())
@@ -656,7 +866,8 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_analyze)
         tb.addAction(self.act_stop)
         tb.addSeparator()
-        for a in (self.act_open, self.act_save, self.act_markers, self.act_watch, self.act_players, self.act_library):
+        for a in (self.act_open, self.act_save, self.act_markers, self.act_review, self.act_watch, self.act_players,
+                  self.act_library):
             tb.addAction(a)
 
         # left: video list + settings
@@ -1690,6 +1901,20 @@ class MainWindow(QMainWindow):
         msg.exec()
         if msg.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl(rel.url))
+
+    def review_selected(self) -> None:
+        rows = sorted({i.row() for i in self.table.selectedIndexes()})
+        cands = [self.videos[r] for r in rows if self.videos[r].result] or [v for v in self.videos if v.result]
+        if not cands:
+            QMessageBox.information(self, APP_NAME, "Scan a video first.")
+            return
+        v = cands[0]
+        ReviewDialog(self, v).exec()
+        from . import analyze
+        v.result = analyze(v.path, use_cache=True)       # re-applies the corrections
+        self._regroup(v)
+        self._update_row(v.path)
+        self._rebuild_tree()
 
     def export_markers_dialog(self) -> None:
         from .markers import FORMATS, export
