@@ -464,7 +464,10 @@ class CalloutDialog(QDialog):
 EFFECT_DEFAULTS = dict(template="", transition="fade", transition_s=0.35, killcam="none", captions=False,
                        intro_text="", intro_sub="", outro_text="", outro_sub="", card_s=2.5,
                        watermark_text="", watermark_image="", watermark_pos="Top right", watermark_opacity=0.7,
-                       audio_track=0, denoise=False, loudnorm=False, thumbnail=False, replay_finale_only=False)
+                       audio_track=0, denoise=False, loudnorm=False, thumbnail=False, replay_finale_only=False,
+                       mlg=False, mlg_intensity="normal", mlg_strobe="normal", mlg_airhorn=True, mlg_cans=True,
+                       mlg_hitmarkers=True, mlg_text=True, mlg_extras=True, mlg_triple=True,
+                       mlg_triple_sound="", mlg_airhorn_sound="", mlg_seed=0)
 
 
 class MontageDialog(QDialog):
@@ -516,6 +519,9 @@ class MontageDialog(QDialog):
         self.sp_seed = QSpinBox()
         self.sp_seed.setRange(0, 9999)
         self.sp_seed.setPrefix("shuffle #")
+        self.cb_mlg = QCheckBox("MLG mode (air horns, hitmarkers, cans, strobe, OH BABY A TRIPLE)")
+        self.cb_mlg.setToolTip("Tune it under Effects… → MLG mode. Warning: contains flashing images.")
+        self.cb_mlg.setChecked(bool(parent.effects.get("mlg")))
         form.addRow("Length", self.sp_len)
         form.addRow("", self.cb_fit)
         form.addRow("Theme", self.cb_theme)
@@ -527,6 +533,7 @@ class MontageDialog(QDialog):
         form.addRow("", self.cb_weapon)
         form.addRow("", self.cb_finale)
         form.addRow("", self.cb_beat)
+        form.addRow("Style", self.cb_mlg)
         vers = QHBoxLayout()
         self.cb_vers = {}
         for n in (15, 30, 60):
@@ -602,6 +609,10 @@ class MontageDialog(QDialog):
 
     def _use(self) -> None:
         self._save_settings()
+        if bool(self.mw.effects.get("mlg")) != self.cb_mlg.isChecked():
+            import json as _json
+            self.mw.effects["mlg"] = self.cb_mlg.isChecked()
+            self.mw.settings.setValue("effects", _json.dumps(self.mw.effects))
         self.mw.apply_montage(self.picks, self.cb_finale.isChecked(), self.cb_beat.isChecked())
         self.accept()
 
@@ -701,6 +712,49 @@ class EffectsDialog(QDialog):
         form.addRow("", self.cb_dn)
         form.addRow("", self.cb_ln)
         form.addRow("Extras", self.cb_thumb)
+        from .mlg import INTENSITIES, STROBE_LABELS, STROBES
+        self.cb_mlg = QCheckBox("MLG mode — the 2014 montage parody look")
+        self.cb_mlg.setToolTip("Hitmarkers, air horns, flying soda cans, meme text, colour strobe and "
+                               "OH BABY A TRIPLE on 3 kills in a few seconds")
+        form.addRow("<b>MLG mode</b>", self.cb_mlg)
+        mrow = QHBoxLayout()
+        self.cb_mlg_int = QComboBox()
+        for k in INTENSITIES:
+            self.cb_mlg_int.addItem(f"{k.capitalize()} chaos", k)
+        self.cb_mlg_strobe = QComboBox()
+        for k in STROBES:
+            self.cb_mlg_strobe.addItem("Strobe: " + STROBE_LABELS[k], k)
+        self.cb_mlg_strobe.setToolTip("Flashing images can trigger seizures in people with photosensitive epilepsy")
+        self.sp_mlg_seed = QSpinBox()
+        self.sp_mlg_seed.setRange(0, 9999)
+        self.sp_mlg_seed.setPrefix("layout #")
+        self.sp_mlg_seed.setToolTip("Change for a different random placement")
+        mrow.addWidget(self.cb_mlg_int)
+        mrow.addWidget(self.cb_mlg_strobe, 1)
+        mrow.addWidget(self.sp_mlg_seed)
+        form.addRow("", mrow)
+        crow = QHBoxLayout()
+        self.cb_mlg_parts = {}
+        for key, label in (("mlg_airhorn", "Air horns"), ("mlg_cans", "Mountain Dew cans"),
+                           ("mlg_hitmarkers", "Hitmarkers"), ("mlg_text", "Meme text"),
+                           ("mlg_extras", "Money / illuminati / shades"), ("mlg_triple", "OH BABY A TRIPLE")):
+            cb = QCheckBox(label)
+            self.cb_mlg_parts[key] = cb
+            crow.addWidget(cb)
+        crow.addStretch(1)
+        form.addRow("", crow)
+        self.ed_snd = {}
+        for key, label, ph in (("mlg_triple_sound", "Triple sound", "your own clip (empty = computer voice)"),
+                               ("mlg_airhorn_sound", "Air horn sound", "your own file (empty = built-in horn)")):
+            row = QHBoxLayout()
+            e = QLineEdit()
+            e.setPlaceholderText(ph)
+            b = QPushButton("Choose…")
+            b.clicked.connect(lambda _=False, e=e: self._pick_sound(e))
+            row.addWidget(e, 1)
+            row.addWidget(b)
+            self.ed_snd[key] = e
+            form.addRow(label, row)
         btns = QHBoxLayout()
         btns.addStretch(1)
         ok = QPushButton("OK")
@@ -728,6 +782,14 @@ class EffectsDialog(QDialog):
         self.cb_dn.setChecked(bool(v["denoise"]))
         self.cb_ln.setChecked(bool(v["loudnorm"]))
         self.cb_thumb.setChecked(bool(v["thumbnail"]))
+        self.cb_mlg.setChecked(bool(v["mlg"]))
+        self.cb_mlg_int.setCurrentIndex(max(0, self.cb_mlg_int.findData(v["mlg_intensity"])))
+        self.cb_mlg_strobe.setCurrentIndex(max(0, self.cb_mlg_strobe.findData(v["mlg_strobe"])))
+        self.sp_mlg_seed.setValue(int(v["mlg_seed"]))
+        for k, cb in self.cb_mlg_parts.items():
+            cb.setChecked(bool(v[k]))
+        for k, e in self.ed_snd.items():
+            e.setText(str(v.get(k, "")))
 
     def values(self) -> dict:
         v = dict(self.v)
@@ -736,10 +798,21 @@ class EffectsDialog(QDialog):
                  watermark_image=self.ed_wimg.text(), watermark_pos=self.cb_wpos.currentText(),
                  watermark_opacity=self.sp_wop.value() / 100, card_s=self.sp_card.value(),
                  audio_track=self.sp_track.value() - 1, denoise=self.cb_dn.isChecked(),
-                 loudnorm=self.cb_ln.isChecked(), thumbnail=self.cb_thumb.isChecked())
-        for k, e in self.ed.items():
+                 loudnorm=self.cb_ln.isChecked(), thumbnail=self.cb_thumb.isChecked(),
+                 mlg=self.cb_mlg.isChecked(), mlg_intensity=self.cb_mlg_int.currentData(),
+                 mlg_strobe=self.cb_mlg_strobe.currentData(), mlg_seed=self.sp_mlg_seed.value())
+        for k, cb in self.cb_mlg_parts.items():
+            v[k] = cb.isChecked()
+        for k, e in {**self.ed, **self.ed_snd}.items():
             v[k] = e.text()
         return v
+
+    def _pick_sound(self, edit: "QLineEdit") -> None:
+        start = os.path.dirname(edit.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Choose a sound", start,
+                                           "Audio (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;All files (*)")
+        if f:
+            edit.setText(f)
 
     def _apply_template(self) -> None:
         from .reel import TEMPLATES

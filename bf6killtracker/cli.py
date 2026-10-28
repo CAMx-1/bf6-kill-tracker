@@ -205,6 +205,14 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             o.denoise = a.denoise or o.denoise
             if a.audio_track:
                 o.audio_track = a.audio_track - 1
+            if a.mlg:
+                o.mlg = True
+            for k in ("mlg_intensity", "mlg_strobe", "mlg_triple_sound", "mlg_airhorn_sound"):
+                if getattr(a, k, None):
+                    setattr(o, k, getattr(a, k))
+            for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
+                if getattr(a, "no_" + k):
+                    setattr(o, "mlg_" + k, False)
             if a.max_mb:
                 o.target_mb = a.max_mb
 
@@ -369,6 +377,16 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--denoise", action="store_true", help="reduce background noise in the game/mic audio")
     an.add_argument("--loudnorm", action="store_true", help="even out loudness (YouTube level)")
     an.add_argument("--thumbnail", metavar="FILE.jpg", help="with --reel: also save a YouTube thumbnail")
+    from .mlg import INTENSITIES, STROBES
+    an.add_argument("--mlg", action="store_true",
+                    help="MLG montage mode: hitmarkers, air horns, cans, meme text, strobe, OH BABY A TRIPLE")
+    an.add_argument("--mlg-intensity", choices=INTENSITIES)
+    an.add_argument("--mlg-strobe", choices=STROBES, help="'max' flashes rapidly (photosensitivity warning)")
+    an.add_argument("--triple-sound", dest="mlg_triple_sound", metavar="FILE",
+                    help="your own 'OH BABY A TRIPLE' clip (default: the computer's voice)")
+    an.add_argument("--airhorn-sound", dest="mlg_airhorn_sound", metavar="FILE", help="your own air horn sound")
+    for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
+        an.add_argument(f"--no-{k}", action="store_true", help=f"MLG mode without the {k}")
     from .hype import ORDERS, THEMES
     an.add_argument("--montage-theme", choices=list(THEMES), default="Everything")
     an.add_argument("--montage-order", choices=list(ORDERS), default="Build-up (best last)")

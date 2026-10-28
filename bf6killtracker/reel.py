@@ -96,6 +96,19 @@ class ReelOptions:
     audio_track: int = 0                        # which audio track of the recording (0 = first; OBS can record more)
     denoise: bool = False                       # reduce background noise/hiss (useful for mic tracks)
     loudnorm: bool = False                      # even out loudness (YouTube's -14 LUFS)
+    # MLG mode (see mlg.py): hitmarkers, air horns, soda cans, meme text, strobe, "OH BABY A TRIPLE"
+    mlg: bool = False
+    mlg_intensity: str = "normal"               # mild | normal | max (how much stuff on screen)
+    mlg_strobe: str = "normal"                  # off | light (colour only) | normal (+ flashes) | max (rapid flashing)
+    mlg_airhorn: bool = True
+    mlg_cans: bool = True
+    mlg_hitmarkers: bool = True
+    mlg_text: bool = True                       # "OH", "WOW", "GET REKT"...
+    mlg_extras: bool = True                     # money rain, illuminati, pixel shades on multi-kills/triples
+    mlg_triple: bool = True                     # "OH BABY A TRIPLE" on 3 kills in a few seconds
+    mlg_triple_sound: str = ""                  # your own clip; empty = the computer's voice
+    mlg_airhorn_sound: str = ""                 # your own air horn; empty = the built-in one
+    mlg_seed: int = 0                           # change for a different random layout
 
 
 # name -> option overrides
@@ -111,14 +124,18 @@ PRESETS: Dict[str, dict] = {
 
 # looks that bundle effects; "callout" entries override the call-out style
 TEMPLATES: Dict[str, dict] = {
-    "Clean": dict(transition="fade", killcam="none", overlays=False, captions=False, replay=False),
-    "Montage": dict(transition="whip", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
+    "Clean": dict(mlg=False, transition="fade", killcam="none", overlays=False, captions=False, replay=False),
+    "Montage": dict(mlg=False, transition="whip", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
                     loudnorm=True, callout=dict(position="Upper third", size=110, shadow=True)),
-    "TikTok hype": dict(vertical=True, size=(1080, 1920), transition="zoom", killcam="both", overlays=True,
+    "TikTok hype": dict(mlg=False, vertical=True, size=(1080, 1920), transition="zoom", killcam="both", overlays=True,
                         captions=True, replay=False, beat_sync=True, loudnorm=True,
                         callout=dict(position="Centre", size=150, color=(255, 220, 40), shadow=True,
                                      text_streak="{n} IN A ROW", text_multi="{name}!")),
-    "Funny moments": dict(transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
+    "MLG": dict(transition="cut", killcam="both", overlays=True, captions=False, replay=True, replay_speed=0.5,
+                beat_sync=True, loudnorm=True, mlg=True,
+                callout=dict(position="Upper third", size=120, color=(255, 230, 0), shadow=True,
+                             text_multi="{name}!!", text_streak="{n} IN A ROW")),
+    "Funny moments": dict(mlg=False, transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
                           replay_speed=0.35, callout=dict(position="Bottom", size=90, uppercase=False,
                                                          text_first="gottem", text_streak="{n} and counting",
                                                          text_multi="{name}?!")),
@@ -405,7 +422,7 @@ def _killcam_filters(p: "_Part", o: ReelOptions, W: int, H: int, F: float) -> st
 
 
 def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: float, enc_args: List[str],
-              out: str, overlays, watermark=None, fades: bool = True) -> List[str]:
+              out: str, overlays, watermark=None, fades: bool = True, mlg=None) -> List[str]:
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-ss", f"{p.start:.3f}", "-t", f"{p.dur:.3f}", "-i", p.seg.video]
     idx = 1
     if not info.has_audio:
@@ -424,6 +441,18 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         cmd += ["-loop", "1", "-t", f"{p.out_dur:.3f}", "-i", watermark[0]]
         wm_in = idx
         idx += 1
+    stickers = list(mlg.stickers) if mlg else []
+    st_inputs = []
+    for s_ in stickers:
+        cmd += ["-loop", "1", "-framerate", f"{F:g}", "-t", f"{max(0.05, s_.b - s_.a):.3f}", "-i", s_.png]
+        st_inputs.append(idx)
+        idx += 1
+    sfx = [(t, f, g) for t, f, g in (mlg.sfx if mlg else []) if 0 <= t < p.out_dur]
+    sfx_inputs = []
+    for _, f, _ in sfx:
+        cmd += ["-i", f]
+        sfx_inputs.append(idx)
+        idx += 1
     d = p.out_dur
     fade_d = min(o.fade, d / 4) if fades else 0.0
     chain = "[0:v]"
@@ -435,8 +464,15 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     chain += (f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=bicubic:out_range=tv,"
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F:g},format=yuv420p")
     chain += _killcam_filters(p, o, W, H, F)
+    if mlg and mlg.vf:
+        chain += mlg.vf
     graph = [chain + "[v0]"]
     last = "v0"
+    for j, (s_, inp) in enumerate(zip(stickers, st_inputs)):
+        rot = (f",rotate=a='{s_.rot}':c=none:ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'" if s_.rot else "")
+        graph.append(f"[{inp}:v]format=rgba{rot},setpts=PTS+{s_.a:.3f}/TB[m{j}]")
+        graph.append(f"[{last}][m{j}]overlay=x='{s_.x}':y='{s_.y}':eof_action=pass[mv{j}]")
+        last = f"mv{j}"
     for j, ((path, x, y, a, b), inp) in enumerate(zip(overlays, ov_inputs)):
         fin, fout = 0.15, 0.2
         graph.append(f"[{inp}:v]format=rgba,fade=t=in:st={a:.3f}:d={fin}:alpha=1,"
@@ -463,7 +499,18 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     af += f",volume={o.game_volume:g}"
     if fade_d > 0:
         af += f",afade=t=in:st=0:d={fade_d:.3f},afade=t=out:st={d - fade_d:.3f}:d={fade_d:.3f}"
-    graph.append(af + ",apad[aout]")
+    if sfx:
+        graph.append(af + "[ag]")
+        names = []
+        for k, ((t, _, g), inp) in enumerate(zip(sfx, sfx_inputs)):
+            ms = int(round(t * 1000))
+            graph.append(f"[{inp}:a]aresample=48000,aformat=channel_layouts=stereo,volume={g:g},"
+                         f"adelay={ms}|{ms}[sx{k}]")
+            names.append(f"[sx{k}]")
+        graph.append(f"[ag]{''.join(names)}amix=inputs={len(names) + 1}:duration=longest:normalize=0,"
+                     "asoftclip,apad[aout]")
+    else:
+        graph.append(af + ",apad[aout]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]", "-t", f"{d:.3f}",
             *enc_args, "-r", f"{F:g}", "-color_range", "tv",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
@@ -665,10 +712,15 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     files: List[str] = []
     done = 0.0
     enc_args = encoder_args(enc, o.crf, o.preset, bitrate)
+    assets = None
+    if o.mlg:
+        from .mlg import Assets
+        assets = Assets(os.path.join(tmp, "mlg"), W, H, o.mlg_airhorn_sound, o.mlg_triple_sound)
     for n, p in enumerate(parts):
         out = os.path.join(tmp, f"part{n:04d}.mp4")
         ovs = _overlay_specs(p, o, W, H, tmp, n)
-        cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades)
+        fx = _mlg_plan(p, o, W, H, assets) if assets else None
+        cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades, fx)
         label = ("Replay: " if p.replay else "") + (p.seg.label or os.path.basename(p.seg.video))
         base = done
         try:
@@ -682,6 +734,14 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
         files.append(out)
         done += p.out_dur
     return files
+
+
+def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets):
+    import random
+    from .mlg import plan
+    kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
+    rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
+    return plan(kills, p.out_dur, W, H, o, assets, rng)
 
 
 def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:

@@ -206,3 +206,26 @@ def test_montage_builder_dialog(app, video, tmp_path):
     assert w.cb_replay.isChecked() and w.effects["replay_finale_only"]
     w.preview.shutdown()
     w.close()
+
+
+def test_mlg_options_round_trip(app, video, tmp_path):
+    from PySide6.QtCore import QSettings
+    from bf6killtracker.gui import EffectsDialog
+    w = MainWindow(QSettings(str(tmp_path / "mlg.ini"), QSettings.IniFormat))
+    d = EffectsDialog(w, w.effects, {})
+    d.cb_tpl.setCurrentIndex(d.cb_tpl.findData("MLG"))
+    d._apply_template()
+    assert d.cb_mlg.isChecked()
+    d.cb_mlg_strobe.setCurrentIndex(d.cb_mlg_strobe.findData("light"))
+    d.cb_mlg_parts["mlg_cans"].setChecked(False)
+    d.ed_snd["mlg_triple_sound"].setText("/x/triple.mp3")
+    w.effects = d.values()
+    o = w.reel_options()
+    assert o.mlg and o.mlg_strobe == "light" and not o.mlg_cans and o.mlg_airhorn
+    assert o.mlg_triple_sound == "/x/triple.mp3"
+    d2 = EffectsDialog(w, w.effects, {})            # re-opens with the same values
+    assert d2.values()["mlg_strobe"] == "light" and not d2.cb_mlg_parts["mlg_cans"].isChecked()
+    w.apply_template("Clean")
+    assert not w.reel_options().mlg
+    w.preview.shutdown()
+    w.close()

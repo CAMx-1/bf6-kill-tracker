@@ -45,7 +45,8 @@ bike-c4.mp4
      - intro and outro cards, and a text or logo watermark;
      - game-audio track choice, noise reduction, and loudness levelling;
      - an automatic YouTube thumbnail;
-     - **templates:** Clean, Montage, TikTok hype, Funny moments, or save your own.
+     - **templates:** Clean, Montage, TikTok hype, Funny moments, MLG, or save your own;
+     - **MLG mode** (below).
    - **Extras:** slow-motion replay of the best kill, clip titles, GPU encoding on Windows.
 8. **Export markers…** writes kills, deaths and streaks as markers for DaVinci Resolve / Premiere (EDL), Final Cut / Resolve (FCPXML) or Premiere (XML), or as YouTube chapter timestamps.
 9. **Save your work.** **Save project…** / **Open project…** keep your videos, ticks, trims, order and settings.
@@ -66,6 +67,18 @@ bike-c4.mp4
 - **Finale replay:** a slow-motion replay of the last clip only.
 - **Cut on the beat.**
 - **Also export** 15, 30 and 60-second versions in the same run.
+
+### MLG mode
+
+The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the tick box in **Make montage…**, or **Effects & branding… → MLG mode**.
+- **Every kill:** a hitmarker with a tick sound, an air horn (picture and BWAAA), flying Mountain Dew cans, meme text ("OH", "WOW", "GET REKT"…) and a colour strobe.
+- **Multi-kills:** money rain.
+- **3 kills within 4 s (or a x3 multi-kill):** "OH BABY A TRIPLE" (voice and text), a screen of scrolling "OHHHHHH", the illuminati, pixel shades dropping in, and deep-fried colours.
+- **Options:**
+  - **Chaos:** mild, normal or max.
+  - **Strobe:** off, colour only, colour plus a flash on kills, or maximum. Maximum flashes rapidly; don't use it if you or your viewers are sensitive to flashing images.
+  - Each element can be switched off, and **layout #** reshuffles the random placement.
+- **Sounds:** the air horn is synthesised by the app. The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original clips aren't included because they're copyrighted.
 
 The app checks GitHub for new releases at start-up.
 
@@ -101,7 +114,8 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 | `--preset NAME` | Export preset, e.g. `"YouTube 1080p60"` or `"Discord (under 25 MB)"`. |
 | `--music FILE --beat-sync` | Add background music, optionally cutting on the beat. |
 | `--montage 60` | With `--reel`: auto-pick the best clips for about 60 s. Also `--montage-theme Headshots`, `--montage-order "Best first"`, `--montage-per-video 2`, `--montage-no-repeat-weapon`, `--montage-fit-music`, `--replay-finale`. |
-| `--template Montage` | A ready-made look: Clean, Montage, TikTok hype, Funny moments. |
+| `--template Montage` | A ready-made look: Clean, Montage, TikTok hype, Funny moments, MLG. |
+| `--mlg` | MLG mode. Also `--mlg-intensity max`, `--mlg-strobe light`, `--triple-sound FILE`, `--airhorn-sound FILE`, `--no-cans` / `--no-airhorn` / `--no-hitmarkers` / `--no-text` / `--no-extras` / `--no-triple`. |
 | `--transition whip --killcam both --captions` | Transitions, kill-cam zoom/shake, kill captions. |
 | `--intro-text CAMx --outro-text "Thanks for watching" --watermark-text @CAMx` | Cards and watermark (`--watermark-image logo.png`). |
 | `--audio-track 2 --denoise --loudnorm --thumbnail thumb.jpg` | Audio options and a YouTube thumbnail. |
