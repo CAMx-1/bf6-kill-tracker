@@ -875,8 +875,11 @@ def build_reel(
     tmp = tempfile.mkdtemp(prefix="bf6reel_")
     try:
         bitrate = None
+        abr = AUDIO_BITRATE
         if o.target_mb and not gif:
-            audio = 160_000 if not o.music else 192_000
+            budget = o.target_mb * 8_000_000 * 0.93 / total
+            abr = "96k" if budget < 600_000 else ("128k" if budget < 1_500_000 else AUDIO_BITRATE)
+            audio = int(abr[:-1]) * 1000              # the final AAC bitrate
             bitrate = max(300_000, int(o.target_mb * 8_000_000 * 0.93 / total) - audio)
         xf = _XFADE.get(o.transition) if not gif else None
         wm = _watermark(o, W, H, tmp)
@@ -903,13 +906,13 @@ def build_reel(
                 _xfade_join(ffmpeg, files, durs, joined, xf, min(o.transition_s, min(durs) / 3), ea, F)
                 total = sum(durs) - (len(durs) - 1) * min(o.transition_s, min(durs) / 3)
             else:
-                _concat(ffmpeg, files, joined, tmp)
+                _concat(ffmpeg, files, joined, tmp, abr)
                 total = sum(durs)
             final = joined
             if o.music and not gif:
                 report(0.97, "Adding music")
                 final = os.path.join(tmp, "music.mp4")
-                _mix_music(ffmpeg, joined, o, total, final)
+                _mix_music(ffmpeg, joined, o, total, final, abr)
             out_dir = os.path.dirname(os.path.abspath(out_path))
             os.makedirs(out_dir, exist_ok=True)
             if gif:
@@ -920,7 +923,7 @@ def build_reel(
                 report(0.985, "Evening out loudness")
                 ln = os.path.join(tmp, "loud.mp4")
                 _simple(ffmpeg, ["-i", final, "-map", "0:v", "-map", "0:a", "-c:v", "copy",
-                                 "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", "192k",
+                                 "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-c:a", "aac", "-b:a", abr,
                                  "-ar", "48000", ln], "normalising loudness")
                 final = ln
             _faststart(ffmpeg, final, out_path)
@@ -979,16 +982,17 @@ def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = Fa
 
 # audio of the intermediate clips: uncompressed, so joined clips add up to exactly their lengths
 PART_AUDIO = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
+AUDIO_BITRATE = "192k"
 
 
-def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:
+def _concat(ffmpeg: str, files: List[str], out: str, tmp: str, abr: str = AUDIO_BITRATE) -> None:
     listing = os.path.join(tmp, "list.txt")
     with open(listing, "w", encoding="utf-8") as f:
         for p in files:
             f.write("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n")
     # video is copied; the PCM audio is encoded once here, so it stays in step with the picture
     _simple(ffmpeg, ["-f", "concat", "-safe", "0", "-i", listing, "-map", "0:v", "-map", "0:a", "-c:v", "copy",
-                     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", out], "joining clips")
+                     "-c:a", "aac", "-b:a", abr, "-ar", "48000", "-ac", "2", out], "joining clips")
 
 
 def _xfade_join(ffmpeg: str, files: List[str], durs: List[float], out: str, kind: str, d: float,
@@ -1010,7 +1014,7 @@ def _xfade_join(ffmpeg: str, files: List[str], durs: List[float], out: str, kind
                      "-r", f"{F:g}", "-c:a", "aac", "-b:a", "160k", "-ar", "48000", out], "joining clips")
 
 
-def _mix_music(ffmpeg: str, video: str, o: ReelOptions, total: float, out: str) -> None:
+def _mix_music(ffmpeg: str, video: str, o: ReelOptions, total: float, out: str, abr: str = "192k") -> None:
     fade_out = min(3.0, total / 4)
     music = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},asetpts=N/SR/TB,"
              f"volume={o.music_volume:g},afade=t=in:st=0:d=0.5,"
@@ -1022,7 +1026,7 @@ def _mix_music(ffmpeg: str, video: str, o: ReelOptions, total: float, out: str) 
     else:
         graph = f"{music}[m];[m][0:a]amix=inputs=2:duration=longest:normalize=0[a]"
     _simple(ffmpeg, ["-i", video, "-stream_loop", "-1", "-i", o.music, "-filter_complex", graph,
-                     "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                     "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", abr,
                      "-t", f"{total:.3f}", out], "adding music")
 
 
