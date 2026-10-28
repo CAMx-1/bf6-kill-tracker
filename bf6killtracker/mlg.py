@@ -357,7 +357,7 @@ def speak(text: str, out_base: str, timeout: float = 20.0) -> Optional[str]:
             env = dict(os.environ, BF6KT_TTS_OUT=out, BF6KT_TTS_TEXT=text)    # no quoting issues
             subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], env=env,
                            timeout=timeout, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           creationflags=NO_WINDOW)
+                           **NO_WINDOW)
         else:
             exe = shutil.which("espeak-ng") or shutil.which("espeak")
             if not exe:
