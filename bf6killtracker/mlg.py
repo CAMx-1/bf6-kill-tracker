@@ -77,12 +77,18 @@ def my_sounds_dir() -> str:
 
     Windows: %LOCALAPPDATA%\\bf6killtracker\\sounds · macOS: ~/Library/Caches/bf6killtracker/sounds
     """
+    env = os.environ.get("BF6KT_SOUNDS_DIR")
+    if env:
+        return env
+    from .winenv import is_packaged, visible_root
+    if is_packaged():        # AppData is virtualized: ffmpeg/Explorer couldn't see files we put there
+        return os.path.join(visible_root(), "sounds")
     from .cache import cache_dir
     return os.path.join(os.path.dirname(cache_dir()), "sounds")
 
 
 def my_sound(name: str) -> str:
-    """Your own sound for ``name`` ("triple" / "airhorn") from :func:`my_sounds_dir`, or ""."""
+    """Your own sound for ``name`` ("triple" / "airhorn"...) from :func:`my_sounds_dir`, or ""."""
     d = my_sounds_dir()
     for ext in SOUND_EXTS:
         p = os.path.join(d, name + ext)

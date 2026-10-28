@@ -525,6 +525,8 @@ def _gui(videos: List[str]) -> int:
 
 
 def main(argv: List[str] | None = None) -> int:
+    from .winenv import fix_temp_dir
+    fix_temp_dir()   # Store/packaged Windows Python: keep temp files where ffmpeg can see them
     argv = sys.argv[1:] if argv is None else argv
     if not argv:
         return _gui([])

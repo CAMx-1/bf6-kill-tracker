@@ -96,6 +96,7 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - Each file is checked against a SHA-256 checksum before it's saved.
 - **Your sounds folder:** the pack lands here, and you can replace any clip with your own by using the same name. **MLG settings… → Open my sounds folder** opens it.
   - Windows: `%LOCALAPPDATA%\bf6killtracker\sounds`; macOS: `~/Library/Caches/bf6killtracker/sounds`; Linux: `~/.cache/bf6killtracker/sounds`.
+  - Python from the Microsoft Store: `%USERPROFILE%\BF6KillTracker\sounds`. Windows hides files that Store apps write into AppData from other programs, including ffmpeg, so the app keeps sounds and temporary files there instead.
   - Name each file after its slot (`.mp3`, `.wav`, `.m4a`, `.ogg`… all work). Silence at the start is trimmed, and long clips fade out.
 
   | File | When it plays |

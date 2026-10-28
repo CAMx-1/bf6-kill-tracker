@@ -3044,6 +3044,8 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    from .winenv import fix_temp_dir
+    fix_temp_dir()   # Store/packaged Windows Python: keep temp files where ffmpeg can see them
     find_ffmpeg()  # fail early with a clear message if ffmpeg can't be found
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)

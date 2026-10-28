@@ -61,3 +61,32 @@ def test_wav_conversion_for_players(tmp_path):
     assert wav.endswith(".wav") and os.path.getsize(wav) > 10000
     assert mlg._as_wav(mp3) == wav                      # cached
     assert mlg.play_sound(str(tmp_path / "missing.mp3")) == ""
+
+
+def test_packaged_windows_uses_visible_folders(monkeypatch, tmp_path):
+    """Store Python virtualizes AppData: sounds and temp files must live outside it."""
+    import tempfile
+    from bf6killtracker import winenv
+    monkeypatch.delenv("BF6KT_SOUNDS_DIR", raising=False)
+    monkeypatch.setenv("BF6KT_ASSUME_PACKAGED", "1")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    winenv.is_packaged.cache_clear()
+    monkeypatch.setattr(winenv, "_done", False)
+    monkeypatch.setattr(tempfile, "tempdir", tempfile.tempdir)
+    try:
+        assert mlg.my_sounds_dir() == os.path.join(str(tmp_path), "BF6KillTracker", "sounds")
+        winenv.fix_temp_dir()
+        assert tempfile.gettempdir() == os.path.join(str(tmp_path), "BF6KillTracker", "temp")
+        assert os.path.isdir(tempfile.gettempdir())
+    finally:
+        winenv.is_packaged.cache_clear()
+
+
+def test_not_packaged_here():
+    import sys
+    from bf6killtracker import winenv
+    if sys.platform != "win32":
+        assert not winenv.is_packaged()
+    else:                                   # CI runners use python.org Python, not the Store one
+        assert winenv.is_packaged() in (True, False)

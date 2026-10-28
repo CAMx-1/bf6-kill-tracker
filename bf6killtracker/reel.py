@@ -827,6 +827,8 @@ def build_reel(
         if v is not None:
             setattr(o, k, v)
     ffmpeg = ffmpeg or find_ffmpeg()
+    from .winenv import fix_temp_dir
+    fix_temp_dir()                               # packaged Windows Python: temp files ffmpeg can see
     gif = out_path.lower().endswith(".gif")
     if o.mlg:
         from .soundpack import ensure
