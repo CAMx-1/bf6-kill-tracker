@@ -11,7 +11,8 @@ from bf6killtracker.video import NO_WINDOW, cut_clip, find_ffmpeg, grab_frame, p
 
 def test_no_window_flag_matches_platform():
     if sys.platform == "win32":
-        assert NO_WINDOW == {"creationflags": subprocess.CREATE_NO_WINDOW}
+        # the window flag must always be set (low-priority mode may add a priority class on top)
+        assert NO_WINDOW["creationflags"] & subprocess.CREATE_NO_WINDOW
     else:
         assert NO_WINDOW == {}
 
