@@ -45,7 +45,9 @@ bike-c4.mp4
      - intro and outro cards, and a text or logo watermark;
      - game-audio track choice, noise reduction, and loudness levelling;
      - an automatic YouTube thumbnail;
-     - **templates:** Clean, Montage, TikTok hype, Funny moments, MLG, or save your own;
+     - **look:** colour grade (Vivid, Warm, Cool, Teal & orange, Cinematic, Black & white, Sepia, Vintage, Neon, Night vision, Deep fried), cinema bars, vignette, film grain;
+     - **templates** (20): Clean, Montage, Cinematic, Esports, Sniper elite, Teal & orange, Retro VHS, Noir, Night ops, Neon, Chill, Deep fried, TikTok hype, Funny moments, and six MLG looks (MLG, MLG lite, MLG MAX, MLG 360 no scope, MLG sounds only, MLG TikTok). You can also save your own;
+     - **▶ Preview this look:** renders a few seconds with the current settings and plays them with sound in your video player. It uses the selected clip, or a made-up demo clip with a kill, a headshot, a triple and a C4 double kill;
      - **MLG mode** (below).
    - **Extras:** slow-motion replay of the best kill, clip titles, GPU encoding on Windows.
 8. **Export markers…** writes kills, deaths and streaks as markers for DaVinci Resolve / Premiere (EDL), Final Cut / Resolve (FCPXML) or Premiere (XML), or as YouTube chapter timestamps.
@@ -71,14 +73,22 @@ bike-c4.mp4
 ### MLG mode
 
 The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the tick box in **Make montage…**, or **Effects & branding… → MLG mode**.
-- **Every kill:** a hitmarker with a tick sound, an air horn (picture and BWAAA), flying Mountain Dew cans, meme text ("OH", "WOW", "GET REKT"…) and a colour strobe.
-- **Multi-kills:** money rain.
-- **3 kills within 4 s (or a x3 multi-kill):** "OH BABY A TRIPLE" (voice and text), a screen of scrolling "OHHHHHH", the illuminati, pixel shades dropping in, and deep-fried colours.
-- **Options:**
+- **Every kill:** a hitmarker with a tick sound, an air horn (picture and BWAAA), flying Mountain Dew cans and nacho chips, meme text ("OH", "WOW", "GET REKT"…) and a colour strobe.
+  - **Headshots:** a sniper scope snaps on just before the kill.
+  - **Explosive kills and multi-kills:** a fireball with a boom and screen shake.
+- **Multi-kills:** money rain and a dubstep wub.
+- **3 kills within 4 s (or a x3 multi-kill):** "OH BABY A TRIPLE" (voice and text), a screen of scrolling "OHHHHHH", a 360 spin, a hitmarker flood, the illuminati, pixel shades dropping in, deep-fried colours and bass-boosted audio.
+- **MLG settings…** has 20 on/off switches, including optional voice lines ("wow", "get rekt"…), rainbow smoke and a siren. It also has:
   - **Chaos:** mild, normal or max.
   - **Strobe:** off, colour only, colour plus a flash on kills, or maximum. Maximum flashes rapidly; don't use it if you or your viewers are sensitive to flashing images.
-  - Each element can be switched off, and **layout #** reshuffles the random placement.
-- **Sounds:** the air horn is synthesised by the app. The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original clips aren't included because they're copyrighted.
+  - **Deep-fry:** off, on triples, or on every kill.
+  - **Air horn chance** (share of single kills that get a horn), **sound effects volume**, your own **meme words** and **triple text**, and **layout #** to reshuffle the random placement.
+  - **▶ Listen** buttons for every sound, and **▶ Preview MLG**.
+- **Sounds and pictures:**
+  - The air horn is a real recording of a stadium gas horn (CC0, from BigSoundBank), cut into the BWAAA-BWA-BWA-BWAAAA rhythm.
+  - The cans and the flying logo use the real Mtn Dew logo, from Wikimedia Commons, where it's public domain as a text logo. Mtn Dew is a PepsiCo trademark, and this project isn't affiliated with PepsiCo.
+  - The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original meme clips aren't included because they're copyrighted.
+  - Sources are listed in `bf6killtracker/templates/mlg/SOURCES.txt`.
 
 The app checks GitHub for new releases at start-up.
 
@@ -114,8 +124,9 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 | `--preset NAME` | Export preset, e.g. `"YouTube 1080p60"` or `"Discord (under 25 MB)"`. |
 | `--music FILE --beat-sync` | Add background music, optionally cutting on the beat. |
 | `--montage 60` | With `--reel`: auto-pick the best clips for about 60 s. Also `--montage-theme Headshots`, `--montage-order "Best first"`, `--montage-per-video 2`, `--montage-no-repeat-weapon`, `--montage-fit-music`, `--replay-finale`. |
-| `--template Montage` | A ready-made look: Clean, Montage, TikTok hype, Funny moments, MLG. |
-| `--mlg` | MLG mode. Also `--mlg-intensity max`, `--mlg-strobe light`, `--triple-sound FILE`, `--airhorn-sound FILE`, `--no-cans` / `--no-airhorn` / `--no-hitmarkers` / `--no-text` / `--no-extras` / `--no-triple`. |
+| `--template Montage` | A ready-made look; one of the 20 templates above (e.g. Cinematic, Noir, "MLG MAX"). |
+| `--mlg` | MLG mode. Also `--mlg-intensity max`, `--mlg-strobe light`, `--mlg-deepfry always`, `--mlg-on voices,smoke` / `--mlg-off cans,spin` (any of the 20 elements), `--mlg-words "GG,EZ"`, `--mlg-sfx-volume 1.5`, `--mlg-airhorn-chance 0.5`, `--triple-sound FILE`, `--airhorn-sound FILE`. |
+| `--grade Cinematic --letterbox --vignette --grain` | Colour grade and film look. |
 | `--transition whip --killcam both --captions` | Transitions, kill-cam zoom/shake, kill captions. |
 | `--intro-text CAMx --outro-text "Thanks for watching" --watermark-text @CAMx` | Cards and watermark (`--watermark-image logo.png`). |
 | `--audio-track 2 --denoise --loudnorm --thumbnail thumb.jpg` | Audio options and a YouTube thumbnail. |
@@ -135,6 +146,8 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 | `--hud-scale 0.9` | Force a HUD scale. Normally detected automatically. |
 
 `calibrate clip.mp4 --at 52.5` writes a PNG showing where the detector looks.
+
+To try a look without a full render: `python -m bf6killtracker preview out.mp4 --template "MLG MAX"`. This renders a few seconds of the demo clip; add `--video FILE --start 50 --kills 52:3` to use your own recording.
 
 ## How it works
 

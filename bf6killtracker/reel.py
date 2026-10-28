@@ -96,6 +96,11 @@ class ReelOptions:
     audio_track: int = 0                        # which audio track of the recording (0 = first; OBS can record more)
     denoise: bool = False                       # reduce background noise/hiss (useful for mic tracks)
     loudnorm: bool = False                      # even out loudness (YouTube's -14 LUFS)
+    # look
+    grade: str = "None"                         # colour grade, see GRADES
+    letterbox: bool = False                     # cinematic black bars
+    vignette: bool = False
+    grain: bool = False                         # film grain
     # MLG mode (see mlg.py): hitmarkers, air horns, soda cans, meme text, strobe, "OH BABY A TRIPLE"
     mlg: bool = False
     mlg_intensity: str = "normal"               # mild | normal | max (how much stuff on screen)
@@ -109,6 +114,26 @@ class ReelOptions:
     mlg_triple_sound: str = ""                  # your own clip; empty = the computer's voice
     mlg_airhorn_sound: str = ""                 # your own air horn; empty = the built-in one
     mlg_seed: int = 0                           # change for a different random layout
+    mlg_deepfry: str = "triples"                # off | triples | always (every kill)
+    mlg_airhorn_chance: float = 1.0             # share of single kills that get a horn (multi-kills always do)
+    mlg_sfx_volume: float = 1.0                 # loudness of all MLG sounds
+    mlg_words: str = ""                         # your own meme words, comma separated (empty = built-in)
+    mlg_triple_text: str = "OH BABY A TRIPLE"
+    mlg_chips: bool = True
+    mlg_logo: bool = True
+    mlg_voices: bool = False
+    mlg_illuminati: bool = True
+    mlg_shades: bool = True
+    mlg_ohscreen: bool = True
+    mlg_hitflood: bool = True
+    mlg_explosions: bool = True
+    mlg_scope: bool = True
+    mlg_smoke: bool = False
+    mlg_spin: bool = True
+    mlg_shake: bool = True
+    mlg_wub: bool = True
+    mlg_siren: bool = False
+    mlg_bassboost: bool = True
 
 
 # name -> option overrides
@@ -122,29 +147,99 @@ PRESETS: Dict[str, dict] = {
 }
 
 
+GRADES: Dict[str, str] = {
+    "None": "",
+    "Vivid": "eq=saturation=1.35:contrast=1.08",
+    "Warm": "colorbalance=rs=.06:gs=.01:bs=-.07:rm=.05:bm=-.05,eq=saturation=1.1",
+    "Cool": "colorbalance=rs=-.05:bs=.07:rm=-.04:bm=.06",
+    "Teal & orange": "colorbalance=rs=-.08:bs=.08:rh=.08:gh=.02:bh=-.09,eq=saturation=1.2:contrast=1.08",
+    "Cinematic": "eq=contrast=1.12:saturation=0.88:gamma=0.95,colorbalance=rs=-.05:bs=.05:rh=.05:bh=-.04",
+    "Black & white": "hue=s=0,eq=contrast=1.25",
+    "Sepia": "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
+    "Vintage": "curves=preset=vintage,eq=saturation=0.85",
+    "Neon": "eq=saturation=1.9:contrast=1.15,hue=h=15",
+    "Night vision": "hue=s=0,lutrgb=r=val*0.25:g=min(255\\,val*1.3):b=val*0.25,noise=alls=10:allf=t",
+    "Deep fried": "eq=saturation=3:contrast=1.6,unsharp=7:7:3,noise=alls=14:allf=t",
+}
+
+# keys a template always sets (back to defaults if it doesn't mention them), so looks don't mix
+LOOK_KEYS = ("grade", "letterbox", "vignette", "grain", "transition", "killcam", "captions", "replay_speed")
+
+_MLG = dict(mlg=True, transition="cut", killcam="both", overlays=True, captions=False, replay=True,
+            replay_speed=0.5, beat_sync=True, loudnorm=True,
+            callout=dict(position="Upper third", size=120, color=(255, 230, 0), shadow=True,
+                         text_multi="{name}!!", text_streak="{n} IN A ROW"))
+
 # looks that bundle effects; "callout" entries override the call-out style
 TEMPLATES: Dict[str, dict] = {
-    "Clean": dict(mlg=False, transition="fade", killcam="none", overlays=False, captions=False, replay=False),
-    "Montage": dict(mlg=False, transition="whip", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
-                    loudnorm=True, callout=dict(position="Upper third", size=110, shadow=True)),
-    "TikTok hype": dict(mlg=False, vertical=True, size=(1080, 1920), transition="zoom", killcam="both", overlays=True,
-                        captions=True, replay=False, beat_sync=True, loudnorm=True,
+    "Clean": dict(transition="fade", killcam="none", overlays=False, captions=False, replay=False),
+    "Montage": dict(transition="whip", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
+                    loudnorm=True, grade="Vivid", callout=dict(position="Upper third", size=110, shadow=True)),
+    "Cinematic": dict(transition="crossfade", transition_s=0.6, killcam="zoom", overlays=False, captions=False,
+                      replay=True, replay_speed=0.35, grade="Cinematic", letterbox=True, vignette=True,
+                      loudnorm=True),
+    "Esports": dict(transition="cut", killcam="zoom", overlays=True, captions=True, replay=True, beat_sync=True,
+                    loudnorm=True, grade="Vivid",
+                    callout=dict(position="Upper third", size=120, color=(255, 255, 255), accent=True,
+                                 accent_color=(0, 200, 255), shadow=True)),
+    "Sniper elite": dict(transition="zoom", killcam="both", overlays=True, captions=True, replay=True,
+                         replay_speed=0.3, grade="Cool", vignette=True,
+                         callout=dict(position="Bottom", size=100, color=(200, 230, 255), text_first="TARGET DOWN")),
+    "Teal & orange": dict(transition="whip", killcam="zoom", overlays=True, captions=True, replay=True,
+                          beat_sync=True, grade="Teal & orange", vignette=True, loudnorm=True),
+    "Retro VHS": dict(transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
+                      grade="Vintage", grain=True, vignette=True,
+                      callout=dict(position="Bottom left", size=90, color=(255, 255, 255), uppercase=True)),
+    "Noir": dict(transition="fade", transition_s=0.6, killcam="none", overlays=True, captions=False, replay=True,
+                 replay_speed=0.35, grade="Black & white", letterbox=True, vignette=True, grain=True,
+                 callout=dict(position="Bottom", size=80, color=(240, 240, 240), uppercase=False)),
+    "Night ops": dict(transition="cut", killcam="shake", overlays=True, captions=True, replay=False,
+                      grade="Night vision", vignette=True,
+                      callout=dict(position="Upper third", size=90, color=(120, 255, 120))),
+    "Neon": dict(transition="zoom", killcam="both", overlays=True, captions=True, replay=True, beat_sync=True,
+                 grade="Neon", loudnorm=True,
+                 callout=dict(position="Centre", size=130, color=(255, 60, 220), shadow=True)),
+    "Chill": dict(transition="crossfade", transition_s=0.8, killcam="none", overlays=False, captions=False,
+                  replay=False, grade="Warm", loudnorm=True),
+    "Deep fried": dict(transition="cut", killcam="both", overlays=True, captions=True, replay=True,
+                       grade="Deep fried", callout=dict(position="Centre", size=150, color=(255, 0, 0))),
+    "TikTok hype": dict(vertical=True, size=(1080, 1920), transition="zoom", killcam="both", overlays=True,
+                        captions=True, replay=False, beat_sync=True, loudnorm=True, grade="Vivid",
                         callout=dict(position="Centre", size=150, color=(255, 220, 40), shadow=True,
                                      text_streak="{n} IN A ROW", text_multi="{name}!")),
-    "MLG": dict(transition="cut", killcam="both", overlays=True, captions=False, replay=True, replay_speed=0.5,
-                beat_sync=True, loudnorm=True, mlg=True,
-                callout=dict(position="Upper third", size=120, color=(255, 230, 0), shadow=True,
-                             text_multi="{name}!!", text_streak="{n} IN A ROW")),
-    "Funny moments": dict(mlg=False, transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
+    "Funny moments": dict(transition="crossfade", killcam="shake", overlays=True, captions=False, replay=True,
                           replay_speed=0.35, callout=dict(position="Bottom", size=90, uppercase=False,
                                                          text_first="gottem", text_streak="{n} and counting",
                                                          text_multi="{name}?!")),
+    "MLG": dict(_MLG),
+    "MLG lite": dict(_MLG, mlg_intensity="mild", mlg_strobe="light", mlg_deepfry="off", mlg_airhorn_chance=0.5,
+                     mlg_hitflood=False, mlg_spin=False, mlg_bassboost=False, mlg_wub=False),
+    "MLG MAX": dict(_MLG, mlg_intensity="max", mlg_deepfry="always", mlg_voices=True, mlg_smoke=True,
+                    mlg_siren=True, grade="Vivid"),
+    "MLG 360 no scope": dict(_MLG, mlg_scope=True, mlg_spin=True, mlg_hitflood=True,
+                             mlg_words="360 NO SCOPE,NO SCOPE,QUICKSCOPED,REKT,GET REKT,#rekt,ur dead m8"),
+    "MLG sounds only": dict(_MLG, mlg_strobe="off", mlg_deepfry="off", mlg_cans=False, mlg_chips=False,
+                            mlg_text=False, mlg_extras=False, mlg_illuminati=False, mlg_shades=False,
+                            mlg_ohscreen=False, mlg_hitflood=False, mlg_explosions=False, mlg_scope=False,
+                            mlg_spin=False, mlg_shake=False, mlg_voices=True, mlg_siren=True),
+    "MLG TikTok": dict(_MLG, vertical=True, size=(1080, 1920)),
 }
+
+
+def template_values(name: str) -> dict:
+    """A template's settings with every look/MLG key filled in (defaults where the template is silent)."""
+    from .mlg import defaults as mlg_defaults
+    base = ReelOptions()
+    t = {k: getattr(base, k) for k in LOOK_KEYS}
+    t.update({k: v for k, v in mlg_defaults().items()
+              if k not in ("mlg_triple_sound", "mlg_airhorn_sound", "mlg_seed")})   # keep the user's own sounds
+    t.update(TEMPLATES.get(name, {}))
+    return t
 
 
 def apply_template(name: str, base: Optional[ReelOptions] = None) -> ReelOptions:
     o = replace(base or ReelOptions())
-    t = dict(TEMPLATES.get(name, {}))
+    t = template_values(name) if name in TEMPLATES else {}
     co = t.pop("callout", None)
     for k, v in t.items():
         setattr(o, k, v)
@@ -288,22 +383,70 @@ def encoder_args(enc: str, crf: int, preset: str, bitrate: Optional[int]) -> Lis
 
 
 # --------------------------------------------------------------------------- building
+class _Stalled(Exception):
+    pass
+
+
 def _run(cmd: List[str], dur: float, on_time: Callable[[float], None], should_cancel, what: str) -> None:
-    proc = subprocess.Popen(cmd + ["-progress", "pipe:1", "-nostats"], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-                            errors="replace", **NO_WINDOW)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        if should_cancel and should_cancel():
-            proc.kill()
-            proc.wait()
-            raise ReelCancelled()
-        m = _TIME_RE.search(line)
-        if m:
-            on_time(min(dur, int(m.group(1)) / 1e6))
-    err = proc.stderr.read() if proc.stderr else ""
-    if proc.wait() != 0:
-        raise RuntimeError(f"ffmpeg failed on {what}: {err.strip()[-1500:]}")
+    """Run ffmpeg with progress; if it stops making progress (some ffmpeg builds occasionally freeze
+    on overlay-heavy graphs), kill it and try once more."""
+    stall = float(os.environ.get("BF6KT_STALL_S", "20"))
+    for attempt in range(2):
+        try:
+            return _run_once(cmd, dur, on_time, should_cancel, what, stall)
+        except _Stalled:
+            if attempt:
+                raise RuntimeError(f"ffmpeg stopped responding on {what}")
+
+
+def _run_once(cmd, dur, on_time, should_cancel, what, stall: float) -> None:
+    import queue
+    import threading
+    import time as _time
+    # stderr goes to a file: a pipe nobody reads fills up on chatty filters and stalls ffmpeg
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as errf:
+        proc = subprocess.Popen(cmd + ["-progress", "pipe:1", "-nostats", "-stats_period", "0.5"],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=errf,
+                                universal_newlines=True, errors="replace", **NO_WINDOW)
+        assert proc.stdout is not None
+        lines: "queue.Queue[Optional[str]]" = queue.Queue()
+
+        def pump() -> None:
+            for ln in proc.stdout:            # type: ignore[union-attr]
+                lines.put(ln)
+            lines.put(None)
+
+        threading.Thread(target=pump, daemon=True).start()
+        last = _time.monotonic()
+        pos_seen = -1
+        while True:
+            if should_cancel and should_cancel():
+                proc.kill()
+                proc.wait()
+                raise ReelCancelled()
+            try:
+                line = lines.get(timeout=0.25)
+            except queue.Empty:
+                if _time.monotonic() - last > stall:
+                    proc.kill()
+                    proc.wait()
+                    raise _Stalled()
+                continue
+            if line is None:
+                break
+            m = _TIME_RE.search(line)
+            if m:
+                pos = int(m.group(1))
+                if pos != pos_seen:             # frozen ffmpeg keeps printing the same time
+                    pos_seen, last = pos, _time.monotonic()
+                on_time(min(dur, pos / 1e6))
+            if _time.monotonic() - last > stall:
+                proc.kill()
+                proc.wait()
+                raise _Stalled()
+        if proc.wait() != 0:
+            errf.seek(0)
+            raise RuntimeError(f"ffmpeg failed on {what}: {errf.read().strip()[-1500:]}")
 
 
 @dataclass
@@ -399,6 +542,47 @@ def _overlay_specs(p: _Part, o: ReelOptions, W: int, H: int, tmp: str, n: int):
     return specs
 
 
+def _look_filters(o: ReelOptions, W: int, H: int) -> str:
+    vf = ""
+    g = GRADES.get(o.grade, "")
+    if g:
+        vf += "," + g + ",format=yuv420p"
+    if o.grain:
+        vf += ",noise=alls=9:allf=t+u"
+    if o.vignette:
+        vf += ",vignette=PI/4.5"
+    if o.letterbox and not o.vertical:
+        bar = max(2, int(round((H - W / 2.39) / 2)))
+        vf += f",drawbox=x=0:y=0:w={W}:h={bar}:color=black:t=fill,drawbox=x=0:y={H - bar}:w={W}:h={bar}:color=black:t=fill"
+    return vf
+
+
+def demo_segment(folder: str, ffmpeg: Optional[str] = None, seconds: float = 7.0) -> Segment:
+    """A made-up clip (moving colours + rumble) with a kill, a headshot, a triple and a C4 double kill,
+    for previewing a look when no recording is at hand."""
+    ffmpeg = ffmpeg or find_ffmpeg()
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, "bf6kt_demo2.mp4")
+    if not os.path.isfile(path):
+        _simple(ffmpeg, ["-f", "lavfi", "-i", f"gradients=s=1280x720:r=30:d={seconds}:speed=0.02:n=4:c0=0x3a4a32:c1=0x6a5a40:"
+                         "c2=0x2a3442:c3=0x8a8270",
+                         "-f", "lavfi", "-i", f"anoisesrc=d={seconds}:c=brown:a=0.08",
+                         "-vf", "drawgrid=w=160:h=90:t=1:c=white@0.15,drawbox=x=630:y=350:w=20:h=20:c=white:t=2",
+                         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                         "-shortest", path], "making the demo clip")
+    kills = [(0.8, 1), (1.9, 1), (3.0, 1), (5.2, 2)]
+    caps = [(0.8, "RIFLE"), (1.9, "HEADSHOT · RIFLE"), (3.0, "RIFLE"), (5.2, "C4")]
+    return Segment(path, 0.0, seconds, "Demo", kills, "Preview", caps)
+
+
+def preview_options(o: ReelOptions) -> ReelOptions:
+    """Fast, small settings for a look preview (keeps every effect)."""
+    p = replace(o, crf=30, preset="ultrafast", target_mb=None, encoder="libx264", fps=30.0,
+                card_s=min(o.card_s, 1.5), beat_sync=False)
+    p.size = (360, 640) if o.vertical else (640, 360)
+    return p
+
+
 def _killcam_filters(p: "_Part", o: ReelOptions, W: int, H: int, F: float) -> str:
     """Zoom punch-in at kills and/or screen shake on headshots (output-clip time)."""
     if p.replay or o.killcam in ("", "none"):
@@ -417,7 +601,7 @@ def _killcam_filters(p: "_Part", o: ReelOptions, W: int, H: int, F: float) -> st
         if on:
             sh = max(4, int(H * 0.012))
             out += (f",crop={W - 2 * sh}:{H - 2 * sh}:x='{sh}+{sh}*sin(t*97)*({on})':"
-                    f"y='{sh}+{sh}*cos(t*71)*({on})',scale={W}:{H}")
+                    f"y='{sh}+{sh}*cos(t*71)*({on})',scale={W}:{H},setsar=1")
     return out
 
 
@@ -464,15 +648,19 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     chain += (f"scale={W}:{H}:force_original_aspect_ratio=decrease:flags=bicubic:out_range=tv,"
               f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={F:g},format=yuv420p")
     chain += _killcam_filters(p, o, W, H, F)
+    chain += _look_filters(o, W, H)
     if mlg and mlg.vf:
         chain += mlg.vf
     graph = [chain + "[v0]"]
     last = "v0"
     for j, (s_, inp) in enumerate(zip(stickers, st_inputs)):
-        rot = (f",rotate=a='{s_.rot}':c=none:ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'" if s_.rot else "")
+        rot = (f",rotate=a='{s_.rot}':c=black@0:ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'" if s_.rot else "")
         graph.append(f"[{inp}:v]format=rgba{rot},setpts=PTS+{s_.a:.3f}/TB[m{j}]")
         graph.append(f"[{last}][m{j}]overlay=x='{s_.x}':y='{s_.y}':eof_action=pass[mv{j}]")
         last = f"mv{j}"
+    if mlg and mlg.vf_post:
+        graph.append(f"[{last}]{mlg.vf_post[1:]}[mpost]")
+        last = "mpost"
     for j, ((path, x, y, a, b), inp) in enumerate(zip(overlays, ov_inputs)):
         fin, fout = 0.15, 0.2
         graph.append(f"[{inp}:v]format=rgba,fade=t=in:st={a:.3f}:d={fin}:alpha=1,"
@@ -507,10 +695,10 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
             graph.append(f"[{inp}:a]aresample=48000,aformat=channel_layouts=stereo,volume={g:g},"
                          f"adelay={ms}|{ms}[sx{k}]")
             names.append(f"[sx{k}]")
-        graph.append(f"[ag]{''.join(names)}amix=inputs={len(names) + 1}:duration=longest:normalize=0,"
-                     "asoftclip,apad[aout]")
+        graph.append(f"[ag]{''.join(names)}amix=inputs={len(names) + 1}:duration=longest:normalize=0"
+                     f"{mlg.af},asoftclip,apad[aout]")
     else:
-        graph.append(af + ",apad[aout]")
+        graph.append(af + (mlg.af if mlg else "") + ",apad[aout]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]", "-t", f"{d:.3f}",
             *enc_args, "-r", f"{F:g}", "-color_range", "tv",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
@@ -740,8 +928,9 @@ def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets):
     import random
     from .mlg import plan
     kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
+    caps = [((t - p.start) / p.speed, c) for t, c in p.seg.captions]
     rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
-    return plan(kills, p.out_dur, W, H, o, assets, rng)
+    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps)
 
 
 def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:

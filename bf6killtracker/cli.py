@@ -205,14 +205,7 @@ def cmd_analyze(a: argparse.Namespace) -> int:
             o.denoise = a.denoise or o.denoise
             if a.audio_track:
                 o.audio_track = a.audio_track - 1
-            if a.mlg:
-                o.mlg = True
-            for k in ("mlg_intensity", "mlg_strobe", "mlg_triple_sound", "mlg_airhorn_sound"):
-                if getattr(a, k, None):
-                    setattr(o, k, getattr(a, k))
-            for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
-                if getattr(a, "no_" + k):
-                    setattr(o, "mlg_" + k, False)
+            apply_look_args(a, o)
             if a.max_mb:
                 o.target_mb = a.max_mb
 
@@ -377,16 +370,7 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--denoise", action="store_true", help="reduce background noise in the game/mic audio")
     an.add_argument("--loudnorm", action="store_true", help="even out loudness (YouTube level)")
     an.add_argument("--thumbnail", metavar="FILE.jpg", help="with --reel: also save a YouTube thumbnail")
-    from .mlg import INTENSITIES, STROBES
-    an.add_argument("--mlg", action="store_true",
-                    help="MLG montage mode: hitmarkers, air horns, cans, meme text, strobe, OH BABY A TRIPLE")
-    an.add_argument("--mlg-intensity", choices=INTENSITIES)
-    an.add_argument("--mlg-strobe", choices=STROBES, help="'max' flashes rapidly (photosensitivity warning)")
-    an.add_argument("--triple-sound", dest="mlg_triple_sound", metavar="FILE",
-                    help="your own 'OH BABY A TRIPLE' clip (default: the computer's voice)")
-    an.add_argument("--airhorn-sound", dest="mlg_airhorn_sound", metavar="FILE", help="your own air horn sound")
-    for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
-        an.add_argument(f"--no-{k}", action="store_true", help=f"MLG mode without the {k}")
+    add_look_args(an)
     from .hype import ORDERS, THEMES
     an.add_argument("--montage-theme", choices=list(THEMES), default="Everything")
     an.add_argument("--montage-order", choices=list(ORDERS), default="Build-up (best last)")
@@ -416,6 +400,20 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("-q", "--quiet", action="store_true", help="no progress output")
     an.set_defaults(func=cmd_analyze)
 
+    pv = sub.add_parser("preview", help="render a few seconds showing a template/look (demo clip or your video)")
+    pv.add_argument("output", help="output .mp4")
+    pv.add_argument("--template", choices=list(TEMPLATES))
+    pv.add_argument("--video", help="use this recording instead of the demo clip")
+    pv.add_argument("--start", type=float, default=0.0, help="with --video: start time (s)")
+    pv.add_argument("--length", type=float, default=8.0)
+    pv.add_argument("--kills", default="", metavar="T:N,...",
+                    help="with --video: kill times (s) and counts, e.g. 2.0:1,3.1:1,4.0:1")
+    pv.add_argument("--transition", choices=["fade", "cut", "crossfade", "whip", "zoom"])
+    pv.add_argument("--killcam", choices=["none", "zoom", "shake", "both"])
+    pv.add_argument("--full-size", action="store_true", help="render at full size instead of a quick 640x360")
+    add_look_args(pv)
+    pv.set_defaults(func=cmd_preview)
+
     gu = sub.add_parser("gui", help="open the desktop app (default when run without arguments)")
     gu.add_argument("videos", nargs="*", help="videos to add on start")
     gu.set_defaults(func=lambda a: _gui(a.videos))
@@ -427,6 +425,75 @@ def build_parser() -> argparse.ArgumentParser:
     ca.add_argument("--hud-scale", type=float, default=1.0)
     ca.set_defaults(func=cmd_calibrate)
     return p
+
+
+def add_look_args(p: argparse.ArgumentParser) -> None:
+    from .mlg import DEEPFRY, INTENSITIES, STROBES, TOGGLES
+    from .reel import GRADES
+    p.add_argument("--grade", choices=list(GRADES), help="colour grade")
+    p.add_argument("--letterbox", action="store_true", help="cinematic black bars")
+    p.add_argument("--vignette", action="store_true")
+    p.add_argument("--grain", action="store_true", help="film grain")
+    p.add_argument("--mlg", action="store_true",
+                   help="MLG montage mode: hitmarkers, air horns, cans, meme text, strobe, OH BABY A TRIPLE")
+    p.add_argument("--mlg-intensity", choices=INTENSITIES)
+    p.add_argument("--mlg-strobe", choices=STROBES, help="'max' flashes rapidly (photosensitivity warning)")
+    p.add_argument("--mlg-deepfry", choices=DEEPFRY)
+    p.add_argument("--mlg-words", metavar="A,B,C", help="your own meme words")
+    p.add_argument("--mlg-triple-text", metavar="TEXT")
+    p.add_argument("--mlg-sfx-volume", type=float, metavar="X", help="sound effects volume (1 = normal)")
+    p.add_argument("--mlg-airhorn-chance", type=float, metavar="0-1", help="share of single kills with a horn")
+    p.add_argument("--mlg-seed", type=int, metavar="N", help="different random layout")
+    names = ", ".join(k[4:] for k in TOGGLES)
+    p.add_argument("--mlg-on", metavar="LIST", help=f"switch MLG elements on: {names}")
+    p.add_argument("--mlg-off", metavar="LIST", help="switch MLG elements off (same names)")
+    p.add_argument("--triple-sound", dest="mlg_triple_sound", metavar="FILE",
+                   help="your own 'OH BABY A TRIPLE' clip (default: the computer's voice)")
+    p.add_argument("--airhorn-sound", dest="mlg_airhorn_sound", metavar="FILE", help="your own air horn sound")
+    for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
+        p.add_argument(f"--no-{k}", action="store_true", help=f"MLG mode without the {k}")
+
+
+def apply_look_args(a: argparse.Namespace, o) -> None:
+    from .mlg import TOGGLES
+    for k in ("grade", "mlg_intensity", "mlg_strobe", "mlg_deepfry", "mlg_words", "mlg_triple_text",
+              "mlg_sfx_volume", "mlg_airhorn_chance", "mlg_seed", "mlg_triple_sound", "mlg_airhorn_sound"):
+        if getattr(a, k, None) is not None:
+            setattr(o, k, getattr(a, k))
+    for k in ("letterbox", "vignette", "grain", "mlg"):
+        if getattr(a, k, False):
+            setattr(o, k, True)
+    for k in ("airhorn", "cans", "hitmarkers", "text", "extras", "triple"):
+        if getattr(a, "no_" + k, False):
+            setattr(o, "mlg_" + k, False)
+    for arg, state in (("mlg_on", True), ("mlg_off", False)):
+        for name in filter(None, (x.strip() for x in (getattr(a, arg, None) or "").split(","))):
+            key = "mlg_" + name.lower().replace("-", "")
+            if key not in TOGGLES:
+                raise SystemExit(f"unknown MLG element {name!r}; choose from: "
+                                 + ", ".join(k[4:] for k in TOGGLES))
+            setattr(o, key, state)
+
+
+def cmd_preview(a: argparse.Namespace) -> int:
+    from .reel import (ReelOptions, Segment, apply_template, build_reel, demo_segment, preview_options)
+    import tempfile
+    o = apply_template(a.template, ReelOptions()) if a.template else ReelOptions()
+    for k in ("transition", "killcam"):
+        if getattr(a, k):
+            setattr(o, k, getattr(a, k))
+    apply_look_args(a, o)
+    if a.video:
+        kills = [(float(x.split(":")[0]), int(x.split(":")[1]) if ":" in x else 1)
+                 for x in a.kills.split(",") if x.strip()]
+        seg = Segment(a.video, a.start, a.start + a.length, "preview", kills)
+    else:
+        seg = demo_segment(os.path.join(tempfile.gettempdir(), "bf6kt_preview"))
+    if not a.full_size:
+        o = preview_options(o)
+    build_reel([seg], a.output, options=o)
+    print(f"wrote {a.output}")
+    return 0
 
 
 def _gui(videos: List[str]) -> int:

@@ -208,24 +208,48 @@ def test_montage_builder_dialog(app, video, tmp_path):
     w.close()
 
 
-def test_mlg_options_round_trip(app, video, tmp_path):
+def test_mlg_options_round_trip(app, video, tmp_path, monkeypatch):
+    import time as _t
     from PySide6.QtCore import QSettings
-    from bf6killtracker.gui import EffectsDialog
+    from bf6killtracker.gui import EffectsDialog, MlgDialog
+    from bf6killtracker.mlg import TOGGLES
+    monkeypatch.setenv("BF6KT_NO_OPEN", "1")
     w = MainWindow(QSettings(str(tmp_path / "mlg.ini"), QSettings.IniFormat))
     d = EffectsDialog(w, w.effects, {})
-    d.cb_tpl.setCurrentIndex(d.cb_tpl.findData("MLG"))
+    d.cb_tpl.setCurrentIndex(d.cb_tpl.findData("MLG MAX"))
     d._apply_template()
-    assert d.cb_mlg.isChecked()
-    d.cb_mlg_strobe.setCurrentIndex(d.cb_mlg_strobe.findData("light"))
-    d.cb_mlg_parts["mlg_cans"].setChecked(False)
-    d.ed_snd["mlg_triple_sound"].setText("/x/triple.mp3")
+    assert d.cb_mlg.isChecked() and d.values()["mlg_intensity"] == "max" and d.values()["mlg_voices"]
+    m = MlgDialog(d, d.values())
+    assert len(m.toggles) == len(TOGGLES) >= 20
+    m.cb_strobe.setCurrentIndex(m.cb_strobe.findData("light"))
+    m.toggles["mlg_cans"].setChecked(False)
+    m.ed_snd["mlg_triple_sound"].setText("/x/triple.mp3")
+    m.sl_vol.setValue(150)
+    m.ed_words.setText("GG, EZ")
+    for k in ("hit", "wub", "boom", "siren", "airhorn"):
+        m.listen(k)
+        assert os.path.getsize(m.last_sound) > 1000
+    d.v = {**d.values(), **m.values()}
+    d._load(d.v)
+    d.cb_grade.setCurrentIndex(d.cb_grade.findData("Black & white"))
+    d.cb_lb.setChecked(True)
     w.effects = d.values()
     o = w.reel_options()
-    assert o.mlg and o.mlg_strobe == "light" and not o.mlg_cans and o.mlg_airhorn
-    assert o.mlg_triple_sound == "/x/triple.mp3"
-    d2 = EffectsDialog(w, w.effects, {})            # re-opens with the same values
-    assert d2.values()["mlg_strobe"] == "light" and not d2.cb_mlg_parts["mlg_cans"].isChecked()
+    assert o.mlg and o.mlg_strobe == "light" and not o.mlg_cans and o.mlg_airhorn and o.letterbox
+    assert o.mlg_triple_sound == "/x/triple.mp3" and o.mlg_sfx_volume == 1.5 and o.mlg_words == "GG, EZ"
+    assert o.grade == "Black & white"
+    m2 = MlgDialog(d, w.effects)                     # re-opens with the same values
+    assert m2.values()["mlg_strobe"] == "light" and not m2.toggles["mlg_cans"].isChecked()
+    # preview renders the look on the demo clip
+    t0 = _t.time()
+    d.preview({**d.values(), "mlg_triple_sound": ""})
+    while not d.last_preview and _t.time() - t0 < 90:
+        app.processEvents()
+        _t.sleep(0.05)
+    assert d.last_preview and os.path.getsize(d.last_preview) > 10000, d.lbl_pv.text()
     w.apply_template("Clean")
-    assert not w.reel_options().mlg
+    o = w.reel_options()
+    assert not o.mlg and o.grade == "None" and not o.letterbox
+    assert o.mlg_triple_sound == "/x/triple.mp3"      # your own sound survives a template change
     w.preview.shutdown()
     w.close()

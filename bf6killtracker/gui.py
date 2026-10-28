@@ -461,13 +461,13 @@ class CalloutDialog(QDialog):
         return self.style_
 
 
+from .mlg import defaults as mlg_defaults  # noqa: E402
+
 EFFECT_DEFAULTS = dict(template="", transition="fade", transition_s=0.35, killcam="none", captions=False,
                        intro_text="", intro_sub="", outro_text="", outro_sub="", card_s=2.5,
                        watermark_text="", watermark_image="", watermark_pos="Top right", watermark_opacity=0.7,
                        audio_track=0, denoise=False, loudnorm=False, thumbnail=False, replay_finale_only=False,
-                       mlg=False, mlg_intensity="normal", mlg_strobe="normal", mlg_airhorn=True, mlg_cans=True,
-                       mlg_hitmarkers=True, mlg_text=True, mlg_extras=True, mlg_triple=True,
-                       mlg_triple_sound="", mlg_airhorn_sound="", mlg_seed=0)
+                       grade="None", letterbox=False, vignette=False, grain=False, **mlg_defaults())
 
 
 class MontageDialog(QDialog):
@@ -520,7 +520,7 @@ class MontageDialog(QDialog):
         self.sp_seed.setRange(0, 9999)
         self.sp_seed.setPrefix("shuffle #")
         self.cb_mlg = QCheckBox("MLG mode (air horns, hitmarkers, cans, strobe, OH BABY A TRIPLE)")
-        self.cb_mlg.setToolTip("Tune it under Effects… → MLG mode. Warning: contains flashing images.")
+        self.cb_mlg.setToolTip("Tune it under Effects… → MLG settings. Warning: contains flashing images.")
         self.cb_mlg.setChecked(bool(parent.effects.get("mlg")))
         form.addRow("Length", self.sp_len)
         form.addRow("", self.cb_fit)
@@ -624,6 +624,193 @@ class MontageDialog(QDialog):
         return [n for n, cb in self.cb_vers.items() if cb.isChecked()]
 
 
+class MlgDialog(QDialog):
+    """Every MLG-mode switch, the chaos/strobe levels, sounds with listen buttons, and a preview."""
+    COLS = 4
+
+    def __init__(self, parent, values: dict):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGridLayout, QGroupBox, QSlider
+        from .mlg import DEEPFRY, INTENSITIES, STROBE_LABELS, STROBES, TOGGLES
+        self.setWindowTitle("MLG mode")
+        self.v = {**mlg_defaults(), **{k: v for k, v in values.items() if k.startswith("mlg")}}
+        lay = QVBoxLayout(self)
+        self.cb_on = QCheckBox("MLG mode on")
+        self.cb_on.setStyleSheet("font-weight: bold")
+        lay.addWidget(self.cb_on)
+        warn = QLabel("⚠ Strobe and flashes can trigger seizures in people with photosensitive epilepsy.")
+        warn.setWordWrap(True)
+        lay.addWidget(warn)
+        form = QFormLayout()
+        lay.addLayout(form)
+        self.cb_int = QComboBox()
+        for k in INTENSITIES:
+            self.cb_int.addItem(f"{k.capitalize()} chaos", k)
+        self.cb_strobe = QComboBox()
+        for k in STROBES:
+            self.cb_strobe.addItem(STROBE_LABELS[k], k)
+        self.cb_fry = QComboBox()
+        for k, label in zip(DEEPFRY, ("Off", "On triples", "On every kill")):
+            self.cb_fry.addItem(label, k)
+        self.sp_seed = QSpinBox()
+        self.sp_seed.setRange(0, 9999)
+        self.sp_seed.setPrefix("layout #")
+        self.sp_seed.setToolTip("Change for a different random placement")
+        r1 = QHBoxLayout()
+        for w_ in (self.cb_int, self.cb_strobe, self.cb_fry, self.sp_seed):
+            r1.addWidget(w_)
+        form.addRow("Chaos / strobe / deep-fry", r1)
+
+        box = QGroupBox("What to add")
+        grid = QGridLayout(box)
+        self.toggles: Dict[str, QCheckBox] = {}
+        for i, (k, (label, _, tip)) in enumerate(TOGGLES.items()):
+            cb = QCheckBox(label)
+            cb.setToolTip(tip)
+            self.toggles[k] = cb
+            grid.addWidget(cb, i // self.COLS, i % self.COLS)
+        allrow = QHBoxLayout()
+        for text, state in (("All on", True), ("All off", False)):
+            b = QPushButton(text)
+            b.clicked.connect(lambda _=False, s=state: [cb.setChecked(s) for cb in self.toggles.values()])
+            allrow.addWidget(b)
+        allrow.addStretch(1)
+        grid.addLayout(allrow, len(TOGGLES) // self.COLS + 1, 0, 1, self.COLS)
+        lay.addWidget(box)
+
+        form2 = QFormLayout()
+        lay.addLayout(form2)
+        self.sl_horn = QSlider(Qt.Horizontal)
+        self.sl_horn.setRange(0, 100)
+        self.lbl_horn = QLabel()
+        self.sl_horn.valueChanged.connect(lambda n: self.lbl_horn.setText(f"{n} % of single kills"))
+        hr = QHBoxLayout()
+        hr.addWidget(self.sl_horn, 1)
+        hr.addWidget(self.lbl_horn)
+        form2.addRow("Air horn chance", hr)
+        self.sl_vol = QSlider(Qt.Horizontal)
+        self.sl_vol.setRange(0, 200)
+        self.lbl_vol = QLabel()
+        self.sl_vol.valueChanged.connect(lambda n: self.lbl_vol.setText(f"{n} %"))
+        vr = QHBoxLayout()
+        vr.addWidget(self.sl_vol, 1)
+        vr.addWidget(self.lbl_vol)
+        form2.addRow("Sound effects volume", vr)
+        self.ed_words = QLineEdit()
+        self.ed_words.setPlaceholderText("your own words, comma separated (empty = OH, WOW, GET REKT, 360 NO SCOPE…)")
+        form2.addRow("Meme words", self.ed_words)
+        self.ed_ttext = QLineEdit()
+        form2.addRow("Triple text", self.ed_ttext)
+        self.ed_snd: Dict[str, QLineEdit] = {}
+        for key, label, ph, kind in (("mlg_triple_sound", "Triple sound", "your own clip (empty = computer voice)",
+                                      "triple"),
+                                     ("mlg_airhorn_sound", "Air horn sound", "your own file (empty = built-in real air horn)",
+                                      "airhorn")):
+            row = QHBoxLayout()
+            e = QLineEdit()
+            e.setPlaceholderText(ph)
+            b = QPushButton("Choose…")
+            b.clicked.connect(lambda _=False, e=e: self._pick_sound(e))
+            bl = QPushButton("▶ Listen")
+            bl.clicked.connect(lambda _=False, k=kind: self.listen(k))
+            for w_ in (e, b, bl):
+                row.addWidget(w_, 1 if w_ is e else 0)
+            self.ed_snd[key] = e
+            form2.addRow(label, row)
+        srow = QHBoxLayout()
+        for kind, label in (("hit", "Hitmarker"), ("wub", "Wub"), ("boom", "Boom"), ("siren", "Siren"),
+                            ("voice", "Voice line")):
+            b = QPushButton("▶ " + label)
+            b.clicked.connect(lambda _=False, k=kind: self.listen(k))
+            srow.addWidget(b)
+        srow.addStretch(1)
+        form2.addRow("Built-in sounds", srow)
+
+        btns = QHBoxLayout()
+        b_pv = QPushButton("▶ Preview MLG")
+        b_pv.setToolTip("Render a few seconds with these settings and play them")
+        b_pv.clicked.connect(self._preview)
+        b_pv.setEnabled(hasattr(parent, "preview"))
+        btns.addWidget(b_pv)
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        lay.addLayout(btns)
+        self.last_sound = ""
+        self._load(self.v)
+
+    def _load(self, v: dict) -> None:
+        self.cb_on.setChecked(bool(v["mlg"]))
+        self.cb_int.setCurrentIndex(max(0, self.cb_int.findData(v["mlg_intensity"])))
+        self.cb_strobe.setCurrentIndex(max(0, self.cb_strobe.findData(v["mlg_strobe"])))
+        self.cb_fry.setCurrentIndex(max(0, self.cb_fry.findData(v["mlg_deepfry"])))
+        self.sp_seed.setValue(int(v["mlg_seed"]))
+        for k, cb in self.toggles.items():
+            cb.setChecked(bool(v[k]))
+        self.sl_horn.setValue(int(round(float(v["mlg_airhorn_chance"]) * 100)))
+        self.sl_vol.setValue(int(round(float(v["mlg_sfx_volume"]) * 100)))
+        self.lbl_horn.setText(f"{self.sl_horn.value()} % of single kills")
+        self.lbl_vol.setText(f"{self.sl_vol.value()} %")
+        self.ed_words.setText(str(v["mlg_words"]))
+        self.ed_ttext.setText(str(v["mlg_triple_text"]))
+        for k, e in self.ed_snd.items():
+            e.setText(str(v.get(k, "")))
+
+    def values(self) -> dict:
+        v = dict(self.v)
+        v.update(mlg=self.cb_on.isChecked(), mlg_intensity=self.cb_int.currentData(),
+                 mlg_strobe=self.cb_strobe.currentData(), mlg_deepfry=self.cb_fry.currentData(),
+                 mlg_seed=self.sp_seed.value(), mlg_airhorn_chance=self.sl_horn.value() / 100,
+                 mlg_sfx_volume=self.sl_vol.value() / 100, mlg_words=self.ed_words.text(),
+                 mlg_triple_text=self.ed_ttext.text() or "OH BABY A TRIPLE")
+        for k, cb in self.toggles.items():
+            v[k] = cb.isChecked()
+        for k, e in self.ed_snd.items():
+            v[k] = e.text()
+        return v
+
+    def _pick_sound(self, edit: "QLineEdit") -> None:
+        start = os.path.dirname(edit.text()) or os.path.expanduser("~")
+        f, _ = QFileDialog.getOpenFileName(self, "Choose a sound", start,
+                                           "Audio (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;All files (*)")
+        if f:
+            edit.setText(f)
+
+    def sound_path(self, kind: str) -> Optional[str]:
+        """Make (or find) the sound file for a listen button."""
+        import random as _random
+        from .mlg import VOICE_LINES, Assets
+        v = self.values()
+        a = Assets(os.path.join(tempfile.gettempdir(), "bf6kt_sounds"), 640, 360,
+                   v["mlg_airhorn_sound"], v["mlg_triple_sound"])
+        if kind == "triple":
+            t = v["mlg_triple_text"].capitalize().replace("Oh baby a", "Oh baby, a") + "!"
+            return a.triple_wav(t)
+        if kind == "voice":
+            return a.voice(_random.choice(VOICE_LINES))
+        return {"airhorn": a.airhorn_wav, "hit": a.hit_wav, "wub": a.wub_wav, "boom": a.boom_wav,
+                "siren": a.siren_wav}[kind]()
+
+    def listen(self, kind: str) -> None:
+        path = self.sound_path(kind)
+        if not path:
+            QMessageBox.information(self, "No voice", "This computer has no built-in voice (on Linux install "
+                                    "espeak-ng). Choose your own sound file instead.")
+            return
+        self.last_sound = path
+        if not os.environ.get("BF6KT_NO_OPEN"):
+            open_with_system(path)
+
+    def _preview(self) -> None:
+        p = self.parent()
+        p.preview({**p.values(), **self.values(), "mlg": True})
+
+
 class EffectsDialog(QDialog):
     """Transitions, kill-cam effects, captions, intro/outro cards, watermark, audio and templates."""
     TRANSITIONS = [("Fade through black", "fade"), ("Hard cut", "cut"), ("Crossfade", "crossfade"),
@@ -712,49 +899,44 @@ class EffectsDialog(QDialog):
         form.addRow("", self.cb_dn)
         form.addRow("", self.cb_ln)
         form.addRow("Extras", self.cb_thumb)
-        from .mlg import INTENSITIES, STROBE_LABELS, STROBES
+        from .reel import GRADES
+        lrow = QHBoxLayout()
+        self.cb_grade = QComboBox()
+        for g in GRADES:
+            self.cb_grade.addItem("Colour: " + g, g)
+        self.cb_lb = QCheckBox("Cinema bars")
+        self.cb_vig = QCheckBox("Vignette")
+        self.cb_grain = QCheckBox("Film grain")
+        lrow.addWidget(self.cb_grade, 1)
+        for w_ in (self.cb_lb, self.cb_vig, self.cb_grain):
+            lrow.addWidget(w_)
+        form.addRow("Look", lrow)
+        mrow = QHBoxLayout()
         self.cb_mlg = QCheckBox("MLG mode — the 2014 montage parody look")
         self.cb_mlg.setToolTip("Hitmarkers, air horns, flying soda cans, meme text, colour strobe and "
                                "OH BABY A TRIPLE on 3 kills in a few seconds")
-        form.addRow("<b>MLG mode</b>", self.cb_mlg)
-        mrow = QHBoxLayout()
-        self.cb_mlg_int = QComboBox()
-        for k in INTENSITIES:
-            self.cb_mlg_int.addItem(f"{k.capitalize()} chaos", k)
-        self.cb_mlg_strobe = QComboBox()
-        for k in STROBES:
-            self.cb_mlg_strobe.addItem("Strobe: " + STROBE_LABELS[k], k)
-        self.cb_mlg_strobe.setToolTip("Flashing images can trigger seizures in people with photosensitive epilepsy")
-        self.sp_mlg_seed = QSpinBox()
-        self.sp_mlg_seed.setRange(0, 9999)
-        self.sp_mlg_seed.setPrefix("layout #")
-        self.sp_mlg_seed.setToolTip("Change for a different random placement")
-        mrow.addWidget(self.cb_mlg_int)
-        mrow.addWidget(self.cb_mlg_strobe, 1)
-        mrow.addWidget(self.sp_mlg_seed)
-        form.addRow("", mrow)
-        crow = QHBoxLayout()
-        self.cb_mlg_parts = {}
-        for key, label in (("mlg_airhorn", "Air horns"), ("mlg_cans", "Mountain Dew cans"),
-                           ("mlg_hitmarkers", "Hitmarkers"), ("mlg_text", "Meme text"),
-                           ("mlg_extras", "Money / illuminati / shades"), ("mlg_triple", "OH BABY A TRIPLE")):
-            cb = QCheckBox(label)
-            self.cb_mlg_parts[key] = cb
-            crow.addWidget(cb)
-        crow.addStretch(1)
-        form.addRow("", crow)
-        self.ed_snd = {}
-        for key, label, ph in (("mlg_triple_sound", "Triple sound", "your own clip (empty = computer voice)"),
-                               ("mlg_airhorn_sound", "Air horn sound", "your own file (empty = built-in horn)")):
-            row = QHBoxLayout()
-            e = QLineEdit()
-            e.setPlaceholderText(ph)
-            b = QPushButton("Choose…")
-            b.clicked.connect(lambda _=False, e=e: self._pick_sound(e))
-            row.addWidget(e, 1)
-            row.addWidget(b)
-            self.ed_snd[key] = e
-            form.addRow(label, row)
+        b_mlg = QPushButton("MLG settings…")
+        b_mlg.setToolTip("20+ switches, strobe, chaos level, sounds (with listen buttons)")
+        b_mlg.clicked.connect(self._edit_mlg)
+        mrow.addWidget(self.cb_mlg, 1)
+        mrow.addWidget(b_mlg)
+        form.addRow("<b>MLG mode</b>", mrow)
+        prow = QHBoxLayout()
+        self.cb_pv_clip = QCheckBox("Use the selected clip")
+        self.cb_pv_clip.setToolTip("Otherwise a made-up demo clip with a kill, a headshot, a triple and a C4 double")
+        _, clip = parent._current_clip() if hasattr(parent, "_current_clip") else (None, None)
+        self.cb_pv_clip.setEnabled(clip is not None)
+        self.cb_pv_clip.setChecked(clip is not None)
+        self.b_preview = QPushButton("▶ Preview this look")
+        self.b_preview.setToolTip("Renders a few seconds with these settings (small and fast) and plays it with sound")
+        self.b_preview.clicked.connect(lambda: self.preview())
+        self.lbl_pv = QLabel("")
+        prow.addWidget(self.b_preview)
+        prow.addWidget(self.cb_pv_clip)
+        prow.addWidget(self.lbl_pv, 1)
+        form.addRow("Preview", prow)
+        self.last_preview = ""
+        self._pv_worker = None
         btns = QHBoxLayout()
         btns.addStretch(1)
         ok = QPushButton("OK")
@@ -783,13 +965,10 @@ class EffectsDialog(QDialog):
         self.cb_ln.setChecked(bool(v["loudnorm"]))
         self.cb_thumb.setChecked(bool(v["thumbnail"]))
         self.cb_mlg.setChecked(bool(v["mlg"]))
-        self.cb_mlg_int.setCurrentIndex(max(0, self.cb_mlg_int.findData(v["mlg_intensity"])))
-        self.cb_mlg_strobe.setCurrentIndex(max(0, self.cb_mlg_strobe.findData(v["mlg_strobe"])))
-        self.sp_mlg_seed.setValue(int(v["mlg_seed"]))
-        for k, cb in self.cb_mlg_parts.items():
-            cb.setChecked(bool(v[k]))
-        for k, e in self.ed_snd.items():
-            e.setText(str(v.get(k, "")))
+        self.cb_grade.setCurrentIndex(max(0, self.cb_grade.findData(v["grade"])))
+        self.cb_lb.setChecked(bool(v["letterbox"]))
+        self.cb_vig.setChecked(bool(v["vignette"]))
+        self.cb_grain.setChecked(bool(v["grain"]))
 
     def values(self) -> dict:
         v = dict(self.v)
@@ -799,27 +978,89 @@ class EffectsDialog(QDialog):
                  watermark_opacity=self.sp_wop.value() / 100, card_s=self.sp_card.value(),
                  audio_track=self.sp_track.value() - 1, denoise=self.cb_dn.isChecked(),
                  loudnorm=self.cb_ln.isChecked(), thumbnail=self.cb_thumb.isChecked(),
-                 mlg=self.cb_mlg.isChecked(), mlg_intensity=self.cb_mlg_int.currentData(),
-                 mlg_strobe=self.cb_mlg_strobe.currentData(), mlg_seed=self.sp_mlg_seed.value())
-        for k, cb in self.cb_mlg_parts.items():
-            v[k] = cb.isChecked()
-        for k, e in {**self.ed, **self.ed_snd}.items():
+                 mlg=self.cb_mlg.isChecked(), grade=self.cb_grade.currentData(), letterbox=self.cb_lb.isChecked(),
+                 vignette=self.cb_vig.isChecked(), grain=self.cb_grain.isChecked())
+        for k, e in self.ed.items():
             v[k] = e.text()
         return v
 
-    def _pick_sound(self, edit: "QLineEdit") -> None:
-        start = os.path.dirname(edit.text()) or os.path.expanduser("~")
-        f, _ = QFileDialog.getOpenFileName(self, "Choose a sound", start,
-                                           "Audio (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;All files (*)")
-        if f:
-            edit.setText(f)
+    def _edit_mlg(self) -> None:
+        cur = self.values()
+        dlg = MlgDialog(self, cur)
+        if dlg.exec():
+            self.v = {**cur, **dlg.values()}
+            self._load(self.v)
+
+    # -- look preview --------------------------------------------------------
+    def preview_options(self, values: Optional[dict] = None) -> ReelOptions:
+        """Main-window settings + this dialog's (unsaved) values, made small and fast."""
+        from .reel import TEMPLATES, apply_template, preview_options
+        mw = self.parent()
+        o = mw.reel_options()
+        if self.template_applied in TEMPLATES:
+            o = apply_template(self.template_applied, o)     # call-out style, overlays, replay of the look
+            o.overlays = o.overlays or TEMPLATES[self.template_applied].get("overlays", False)
+        for k, val in (values or self.values()).items():
+            if hasattr(o, k) and k != "template":
+                setattr(o, k, val)
+        return preview_options(o)
+
+    def preview_segment(self) -> Segment:
+        from .reel import caption_for, demo_segment
+        mw = self.parent()
+        v, c = mw._current_clip() if hasattr(mw, "_current_clip") else (None, None)
+        if self.cb_pv_clip.isChecked() and v is not None and c is not None:
+            a = max(0.0, c.start - 1.5)
+            b = min(v.duration or c.end + 2, c.end + 2.0, a + 14.0)
+            kills = [(k.time, k.count) for k in c.events if a <= k.time <= b]
+            caps = [(k.time, caption_for(k.type_list(), k.weapons)) for k in c.events if a <= k.time <= b]
+            return Segment(v.path, a, b, c.title, kills, c.title, caps)
+        return demo_segment(os.path.join(tempfile.gettempdir(), "bf6kt_preview"))
+
+    def preview(self, values: Optional[dict] = None) -> None:
+        if self._pv_worker is not None:
+            return
+        try:
+            seg = self.preview_segment()
+            o = self.preview_options(values)
+        except Exception as exc:
+            self.lbl_pv.setText(f"Preview failed: {exc}")
+            return
+        d = os.path.join(tempfile.gettempdir(), "bf6kt_preview")
+        os.makedirs(d, exist_ok=True)
+        out = os.path.join(d, f"look_{int(time.time() * 1000) % 10_000_000}.mp4")   # new name: players lock files
+        w = ReelWorker([seg], out, o)
+        self._pv_worker = w
+        self.b_preview.setEnabled(False)
+        self.lbl_pv.setText("Rendering preview…")
+
+        def wire(worker):
+            worker.progress.connect(lambda f, m: self.lbl_pv.setText(f"Rendering preview… {int(f * 100)}%"))
+            worker.done.connect(self._preview_done)
+            worker.failed.connect(self._preview_failed)
+
+        self.parent()._run_in_thread(w, wire)
+
+    def _preview_done(self, path: str) -> None:
+        self._pv_worker = None
+        self.b_preview.setEnabled(True)
+        self.last_preview = path
+        self.lbl_pv.setText("Playing in your video player")
+        if not os.environ.get("BF6KT_NO_OPEN"):
+            open_with_system(path)
+
+    def _preview_failed(self, msg: str) -> None:
+        self._pv_worker = None
+        self.b_preview.setEnabled(True)
+        self.lbl_pv.setText("Preview failed: " + msg[-200:])
 
     def _apply_template(self) -> None:
         from .reel import TEMPLATES
         key = self.cb_tpl.currentData()
         if not key:
             return
-        t = self.user_templates[key[5:]] if key.startswith("user:") else TEMPLATES[key]
+        from .reel import template_values
+        t = self.user_templates[key[5:]] if key.startswith("user:") else template_values(key)
         cur = self.values()
         for k in EFFECT_DEFAULTS:
             if k in t:
@@ -2231,10 +2472,11 @@ class MainWindow(QMainWindow):
     def apply_template(self, key: str) -> None:
         """Set the main-window extras (call-outs, replay, beat sync, call-out style, export) from a template."""
         from .reel import TEMPLATES
+        from .reel import template_values
         if key.startswith("user:"):
             t = self._user_templates().get(key[5:], {})
         else:
-            t = TEMPLATES.get(key, {})
+            t = template_values(key) if key in TEMPLATES else {}
         for k, cb in (("overlays", self.cb_overlays), ("replay", self.cb_replay), ("beat_sync", self.cb_beat)):
             if k in t:
                 cb.setChecked(bool(t[k]))

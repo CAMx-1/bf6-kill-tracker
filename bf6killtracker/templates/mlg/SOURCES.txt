@@ -1,0 +1,14 @@
+MLG mode assets
+
+airhorn.wav
+  Cut and re-arranged (BWAAA-BWA-BWA-BWAAAA) from two real recordings of a hand-held
+  gas air horn by Joseph SARDIN, BigSoundBank / LaSonotheque, released under CC0
+  (public domain):
+    "Gas fog horn #1"  https://bigsoundbank.com/gas-fog-horn-1-s1048.html
+    "Gas fog horn #2"  https://bigsoundbank.com/gas-fog-horn-2-s1049.html
+
+mtn_dew_logo.png
+  Rendered from https://commons.wikimedia.org/wiki/File:Mountain_Dew_logo.svg
+  (Wikimedia Commons, public domain: text logo below the threshold of originality).
+  Mountain Dew / Mtn Dew is a trademark of PepsiCo, Inc. This project is not
+  affiliated with or endorsed by PepsiCo. Used here for the parody "MLG montage" look.
