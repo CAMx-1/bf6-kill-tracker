@@ -89,6 +89,28 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - The cans and the flying logo use the real Mtn Dew logo, from Wikimedia Commons, where it's public domain as a text logo. Mtn Dew is a PepsiCo trademark, and this project isn't affiliated with PepsiCo.
   - The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original meme clips aren't included because they're copyrighted.
   - Sources are listed in `bf6killtracker/templates/mlg/SOURCES.txt`.
+- **Your sounds folder:** drop meme clips in here and MLG mode uses them automatically. **MLG settings… → Open my sounds folder** opens it.
+  - Windows: `%LOCALAPPDATA%\bf6killtracker\sounds`; macOS: `~/Library/Caches/bf6killtracker/sounds`; Linux: `~/.cache/bf6killtracker/sounds`.
+  - Name each file after its slot (`.mp3`, `.wav`, `.m4a`, `.ogg`… all work). Silence at the start is trimmed, and long clips fade out.
+
+  | File | When it plays |
+  |---|---|
+  | `triple` | "OH BABY A TRIPLE" on 3 kills in 4 s |
+  | `dotatriple` | Announcer "TRIPLE KILL!" just before it |
+  | `airhorn` | Replaces the built-in air horn |
+  | `hit` | Replaces the hitmarker tick |
+  | `explosion` | Explosive kills and multi-kills |
+  | `headshot`, `wow` | Headshots (the headshot voice, then the anime "wow") |
+  | `what` | Multi-kills at once, e.g. a C4 double |
+  | `omgwow` | A quick follow-up kill (within 3 s) |
+  | `money` | With the money rain |
+  | `mtndew` | "I'm talking about Mountain Dew baby" with the flying logo |
+  | `boompow` | The finishing kill of a clip with 3+ kills |
+  | `fbi` | 4+ kills in 6 s, with a door-breach shake on the shout |
+  | `pwnage` | Intro sting at the very start |
+  | `sandstorm`, `sandstorm_flute` | Background music, chosen under **MLG music** or with `--mlg-music` (MLG MAX picks Sandstorm). It loops and only plays when no other music is chosen. |
+
+  Each slot has its own switch and ▶ Listen button in MLG settings.
 
 The app checks GitHub for new releases at start-up.
 

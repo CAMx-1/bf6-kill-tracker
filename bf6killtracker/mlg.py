@@ -61,6 +61,56 @@ def bundled(name: str) -> Optional[str]:
     return p if os.path.isfile(p) else None
 
 
+SOUND_EXTS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".aiff")
+MY_SOUNDS = ("triple", "airhorn", "explosion", "fbi", "wow", "what", "money", "omgwow", "dotatriple", "boompow",
+             "hit", "headshot", "mtndew", "pwnage", "sandstorm", "sandstorm_flute")
+MUSIC = {"off": "None", "sandstorm": "Darude - Sandstorm", "sandstorm_flute": "Sandstorm (flute)"}
+# longest stretch of each of your sounds to play (s); longer files fade out
+MY_SOUND_CAP = {"triple": 5.0, "airhorn": 3.0, "explosion": 3.0, "fbi": 7.5, "wow": 3.0, "what": 3.0,
+                "money": 3.0, "omgwow": 3.5, "dotatriple": 2.5, "boompow": 4.5, "hit": 0.6, "headshot": 3.0,
+                "mtndew": 2.5, "pwnage": 7.0}
+
+
+def my_sounds_dir() -> str:
+    """Per-user folder checked for your own sounds: triple / airhorn / explosion / fbi / wow / what / money / omgwow / dotatriple / boompow / hit / headshot / mtndew / pwnage / sandstorm (.mp3, .wav...).
+
+    Windows: %LOCALAPPDATA%\\bf6killtracker\\sounds · macOS: ~/Library/Caches/bf6killtracker/sounds
+    """
+    from .cache import cache_dir
+    return os.path.join(os.path.dirname(cache_dir()), "sounds")
+
+
+def my_sound(name: str) -> str:
+    """Your own sound for ``name`` ("triple" / "airhorn") from :func:`my_sounds_dir`, or ""."""
+    d = my_sounds_dir()
+    for ext in SOUND_EXTS:
+        p = os.path.join(d, name + ext)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def sound_length(path: str) -> float:
+    """Length of an audio file in seconds (0 if unknown)."""
+    if not path:
+        return 0.0
+    if path.lower().endswith(".wav"):
+        try:
+            with wave.open(path) as w:
+                return w.getnframes() / float(w.getframerate())
+        except (wave.Error, OSError, EOFError):
+            pass
+    import re
+    from .video import NO_WINDOW, find_ffmpeg
+    try:
+        r = subprocess.run([find_ffmpeg(), "-hide_banner", "-i", path], capture_output=True, text=True,
+                           errors="replace", timeout=20, **NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", r.stderr)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
+
+
 def mtn_dew_logo(width: int) -> Optional[Image.Image]:
     p = bundled("mtn_dew_logo.png")
     if not p:
@@ -539,7 +589,9 @@ class Assets:
 
     def __init__(self, folder: str, W: int, H: int, airhorn_sound: str = "", triple_sound: str = "") -> None:
         self.dir, self.W, self.H = folder, W, H
-        self.user_airhorn, self.user_triple = airhorn_sound, triple_sound
+        # explicit choice > your sounds folder > built-in
+        self.user_airhorn = airhorn_sound if airhorn_sound and os.path.isfile(airhorn_sound) else my_sound("airhorn")
+        self.user_triple = triple_sound if triple_sound and os.path.isfile(triple_sound) else my_sound("triple")
         self._cache: Dict[str, Optional[str]] = {}
         os.makedirs(folder, exist_ok=True)
 
@@ -610,13 +662,23 @@ class Assets:
         return self._img("logo", lambda: mtn_dew_logo(int(self.W * 0.30)))
 
     def hit_wav(self) -> str:
-        return self._synth("hit", hit_wave)
+        return my_sound("hit") or self._synth("hit", hit_wave)
 
     def wub_wav(self) -> str:
         return self._synth("wub", wub_wave)
 
     def boom_wav(self) -> str:
-        return self._synth("boom", boom_wave)
+        return my_sound("explosion") or self._synth("boom", boom_wave)
+
+    def fbi_wav(self) -> Optional[str]:
+        return my_sound("fbi") or None
+
+    def wow_wav(self) -> Optional[str]:
+        return my_sound("wow") or self.voice("wow")
+
+    def mine(self, name: str) -> Optional[str]:
+        """One of your sounds folder's clips (what / money / omgwow ...), or None."""
+        return my_sound(name) or None
 
     def siren_wav(self) -> str:
         return self._synth("siren", siren_wave)
@@ -653,6 +715,16 @@ TOGGLES: Dict[str, Tuple[str, bool, str]] = {
     "mlg_spin": ("360 spin", True, "The whole picture does a 360 on triples"),
     "mlg_shake": ("Screen shake", True, "Shake on triples and explosions"),
     "mlg_wub": ("Dubstep wub", True, "Wobble bass on multi-kills"),
+    "mlg_wow": ("WOW on headshots", True, "Anime 'wow' (wow.mp3 from your sounds folder, else the voice)"),
+    "mlg_what": ("WHAT?!", True, "On multi-kills at once, e.g. a C4 double (what.mp3 in your sounds folder)"),
+    "mlg_omgwow": ("OMG WOW", True, "On quick follow-up kills (omgwow.mp3 in your sounds folder)"),
+    "mlg_money_sound": ("Money sound", True, "Cash register with the money rain (money.mp3 in your sounds folder)"),
+    "mlg_dota": ("Announcer TRIPLE KILL", True, "Game announcer before OH BABY A TRIPLE (dotatriple.mp3)"),
+    "mlg_boompow": ("BOOM BAM POW", True, "On the finishing kill of a 3+ kill clip (boompow.mp3)"),
+    "mlg_headshot_sound": ("Headshot voice", True, "'Best ever headshot' on headshots (headshot.mp3)"),
+    "mlg_mtndew_sound": ("Mtn Dew baby", True, "'I'm talking about Mountain Dew baby' with the flying logo (mtndew.mp3)"),
+    "mlg_intro": ("Intro sting", True, "MLG sting at the start of the video (pwnage.mp3)"),
+    "mlg_fbi": ("FBI OPEN UP", True, "On 4+ kills in a few seconds (uses fbi.mp3 from your sounds folder)"),
     "mlg_siren": ("Siren", False, "Wee-woo siren on triples"),
     "mlg_bassboost": ("Bass boost", True, "Distorted, bass-boosted audio during triples"),
 }
@@ -661,7 +733,7 @@ TOGGLES: Dict[str, Tuple[str, bool, str]] = {
 def defaults() -> Dict[str, object]:
     """All MLG settings with their default values (also used by the GUI)."""
     d: Dict[str, object] = {k: v[1] for k, v in TOGGLES.items()}
-    d.update(mlg=False, mlg_intensity="normal", mlg_strobe="normal", mlg_deepfry="triples", mlg_seed=0,
+    d.update(mlg=False, mlg_music="off", mlg_intensity="normal", mlg_strobe="normal", mlg_deepfry="triples", mlg_seed=0,
              mlg_airhorn_chance=1.0, mlg_sfx_volume=1.0, mlg_words="", mlg_triple_text=TRIPLE_TEXT,
              mlg_triple_sound="", mlg_airhorn_sound="")
     return d
@@ -689,6 +761,7 @@ class Plan:
     sfx: List[Tuple[float, str, float]] = field(default_factory=list)    # (clip time, file, gain)
     vf: str = ""                                                         # filters for the main video chain
     af: str = ""                                                         # filters after the sound mix
+    caps: Dict[str, float] = field(default_factory=dict)                 # file -> longest stretch to play
     vf_post: str = ""                                                    # filters on the finished picture
     triples: List[float] = field(default_factory=list)
 
@@ -698,13 +771,14 @@ _COUNTS = {"mild": dict(cans=1, words=1, bills=5, hits=8, max_stickers=24, max_s
            "max": dict(cans=4, words=2, bills=14, hits=24, max_stickers=60, max_sfx=24)}
 
 
-def find_triples(kills: Sequence[Tuple[float, int]], window: float = 4.0, gap: float = 4.0) -> List[float]:
-    """Times where a 3rd kill lands within ``window`` seconds (multi-kill x3 counts at once)."""
+def find_triples(kills: Sequence[Tuple[float, int]], window: float = 4.0, gap: float = 4.0,
+                 need: int = 3) -> List[float]:
+    """Times where a 3rd (``need``-th) kill lands within ``window`` seconds (a x3 multi-kill counts at once)."""
     out: List[float] = []
     ks = sorted(kills)
     for i, (t, _) in enumerate(ks):
         n = sum(c for tt, c in ks[:i + 1] if t - window <= tt <= t)
-        if n >= 3 and (not out or t - out[-1] >= gap):
+        if n >= need and (not out or t - out[-1] >= gap):
             out.append(t)
     return out
 
@@ -715,7 +789,7 @@ def _b(a: float, b: float) -> str:
 
 def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, assets: Assets,
          rng: random.Random, triples: Optional[Sequence[float]] = None,
-         captions: Sequence[Tuple[float, str]] = ()) -> Plan:
+         captions: Sequence[Tuple[float, str]] = (), first: bool = False) -> Plan:
     """Stickers, sounds and filters for one clip. ``kills``/``captions`` are in clip time."""
     D = defaults()
     on = lambda k: bool(getattr(o, k, D.get(k)))  # noqa: E731
@@ -729,6 +803,8 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
     trip = [t for t in (find_triples(ks) if triples is None else triples) if 0 <= t <= dur] \
         if on("mlg_triple") else []
     pl.triples = list(trip)
+    fbi = assets.fbi_wav() if on("mlg_fbi") else None
+    quads = [t for t in find_triples(ks, window=6.0, gap=8.0, need=4) if 0 <= t <= dur] if fbi else []
     caps = [(t, c.upper()) for t, c in captions if 0 <= t <= dur]
 
     def cap_near(t: float, word: str) -> bool:
@@ -743,6 +819,8 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
     spins: List[Tuple[float, float]] = []
     bass: List[Tuple[float, float]] = []
     last_horn = -9.0
+    prev_kill: Optional[float] = None
+    triple_line_at: Dict[float, float] = {}
 
     def until(t: float, s: float) -> float:
         return min(dur, t + s)
@@ -759,6 +837,12 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
             pl.stickers.append(Sticker(assets.scope(), "0", "0", a, until(t, 0.08), prio=1, layer=0))
             pl.stickers.append(Sticker(assets.text("HEADSHOT", "red", 0.12), f"{W}/2-w/2", f"{H * 0.78:.0f}",
                                        t, until(t, 1.0), rot="0.05*sin(t*30)", prio=2, layer=5))
+        hs_voice = assets.mine("headshot") if headshot and on("mlg_headshot_sound") else None
+        if hs_voice:
+            snd(t + 0.05, hs_voice, 1.0, 1)
+        if on("mlg_wow") and headshot:      # after the headshot voice, if there is one
+            wait = min(MY_SOUND_CAP["headshot"], sound_length(hs_voice) or 2.5) if hs_voice else 0.0
+            snd(t + 0.05 + wait, assets.wow_wav(), 0.9, 2)
         if on("mlg_hitmarkers"):
             pl.stickers.append(Sticker(assets.hit(), f"{cx:.0f}-w/2", f"{cy:.0f}-h/2", t, until(t, 0.28),
                                        prio=0, layer=6))
@@ -791,13 +875,24 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         if on("mlg_text"):
             for _ in range(lvl["words"] + (1 if c >= 2 else 0)):
                 _word(pl, assets, W, H, t + rng.uniform(0.0, 0.3), dur, rng, words)
+        if c >= 2 and on("mlg_what") and t not in trip:
+            snd(t + 0.1, assets.mine("what"), 0.85, 2)
+        elif (on("mlg_omgwow") and t not in trip and not (headshot and on("mlg_wow"))
+              and prev_kill is not None and 0.3 < t - prev_kill <= 3.0):
+            snd(t + 0.1, assets.mine("omgwow"), 0.85, 3)
+        prev_kill = t
         if on("mlg_voices") and t not in trip and rng.random() < 0.6:
-            snd(t + 0.25, assets.voice(rng.choice(VOICE_LINES)), 1.0, 4)
+            line = rng.choice(VOICE_LINES)
+            snd(t + 0.25, assets.wow_wav() if line == "wow" else assets.voice(line), 1.0, 4)
         if c >= 2 and on("mlg_logo") and assets.logo():
             _flying(pl, assets.logo(), assets, W, H, t + 0.2, dur, rng, prio=2)  # type: ignore[arg-type]
+            if on("mlg_mtndew_sound") and t not in trip:
+                snd(t + 0.3, assets.mine("mtndew"), 1.0, 3)
         if c >= 2 and t not in trip:
             if on("mlg_extras"):
                 _money(pl, assets, W, H, t, dur, rng, lvl["bills"] // 2)
+                if on("mlg_money_sound"):
+                    snd(t + 0.3, assets.mine("money"), 0.7, 5)
             if on("mlg_wub"):
                 snd(t + 0.1, assets.wub_wav(), 0.7, 4)
         strobe.append((t, until(t, 0.55)))
@@ -833,6 +928,8 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
                                        t + 0.3, until(t, 2.6), prio=2, layer=4))
         if on("mlg_extras"):
             _money(pl, assets, W, H, t, dur, rng, lvl["bills"])
+            if on("mlg_money_sound"):
+                snd(t + 1.0, assets.mine("money"), 0.6, 5)
         if on("mlg_hitflood"):
             for i in range(lvl["hits"]):
                 a = t + rng.uniform(0, 1.2)
@@ -850,7 +947,13 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
                 _flying(pl, assets.can(), assets, W, H, t + rng.uniform(0.2, 1.2), dur, rng, prio=3)
             if on("mlg_chips"):
                 _flying(pl, assets.chip(), assets, W, H, t + rng.uniform(0.2, 1.2), dur, rng, prio=4)
-        snd(t + 0.15, assets.triple_wav(ttext.capitalize().replace("Oh baby a", "Oh baby, a") + "!"), 1.0, 0)
+        line_at = t + 0.15
+        dota = assets.mine("dotatriple") if on("mlg_dota") else None
+        if dota:                                  # "TRIPLE KILL!" ... "oh baby a triple"
+            snd(t + 0.05, dota, 1.0, 0)
+            line_at = t + 0.1 + min(MY_SOUND_CAP["dotatriple"], sound_length(dota) or 1.9)
+        snd(line_at, assets.triple_wav(ttext.capitalize().replace("Oh baby a", "Oh baby, a") + "!"), 1.0, 0)
+        triple_line_at[t] = line_at
         if on("mlg_airhorn"):
             snd(t + 1.2, assets.airhorn_wav(), 0.6, 2)
         if on("mlg_siren"):
@@ -867,11 +970,43 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         if getattr(o, "mlg_deepfry", "triples") != "off":
             fry.append((t, until(t, 2.4)))
 
+    if first and on("mlg_intro"):
+        snd(0.0, assets.mine("pwnage"), 0.8, 0)
+
+    boom = assets.mine("boompow") if on("mlg_boompow") else None
+    if boom and sum(c for _, c in ks) >= 3:
+        t = ks[-1][0]
+        busy = [tr for tr in trip if -0.5 < t - tr < 5.0]          # don't talk over the triple
+        if not busy and t + 1.5 < dur:
+            snd(t + 0.1, boom, 0.9, 1)
+            shake.append((t, until(t, 0.6)))
+
+    for t in quads:                          # FBI OPEN UP: knock, knock... door breach
+        near = [tr for tr in trip if abs(t - tr) < 3.0]
+        if near:            # right after a triple: start once "oh baby a triple" is said (knocks cover the rest)
+            t = max(t, triple_line_at.get(max(near), max(near) + 0.15)
+                    + min(1.8, sound_length(assets.triple_wav() or "") or 1.8))
+        if t + 2.0 > dur:   # no time left for the shout (at +1.6 s)
+            continue
+        snd(t, fbi, 1.0, 0)
+        hit_at = t + 1.6                         # the shout/breach (leading silence is trimmed)
+        txt = assets.text("FBI OPEN UP!", "blue", 0.16)
+        pl.stickers.append(Sticker(txt, f"{W}/2-w/2+{W // 70}*sin(t*45)", f"{H * 0.22:.0f}", hit_at,
+                                   until(hit_at, 1.8), rot="0.05*sin(t*20)", prio=0, layer=5))
+        shake.append((hit_at, until(hit_at, 0.9)))
+        flashes.append(hit_at)
+        strobe.append((hit_at, until(hit_at, 0.4)))
+
     pl.stickers.sort(key=lambda s: s.prio)
     pl.stickers = pl.stickers[:lvl["max_stickers"]]
     pl.stickers.sort(key=lambda s: s.layer)
     sfx = sorted(pl.sfx, key=lambda s: s[3])[:lvl["max_sfx"]]           # type: ignore[index]
     pl.sfx = sorted(((t, f, g) for t, f, g, _ in sfx), key=lambda s: s[0])  # type: ignore[misc]
+    mine = {my_sound(n): cap for n, cap in MY_SOUND_CAP.items() if my_sound(n)}
+    for user, n in ((getattr(o, "mlg_triple_sound", ""), "triple"), (getattr(o, "mlg_airhorn_sound", ""), "airhorn")):
+        if user:
+            mine[user] = MY_SOUND_CAP[n]
+    pl.caps = {f: mine[f] for _, f, _ in pl.sfx if f in mine}
     pl.vf = strobe_filters(getattr(o, "mlg_strobe", "normal"), strobe, flashes, fry)
     pl.vf_post = motion_filters(W, H, spins, shake)          # spin/shake everything, stickers included
     if bass:

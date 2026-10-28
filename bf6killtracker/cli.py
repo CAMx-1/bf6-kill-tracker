@@ -440,6 +440,9 @@ def add_look_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mlg-strobe", choices=STROBES, help="'max' flashes rapidly (photosensitivity warning)")
     p.add_argument("--mlg-deepfry", choices=DEEPFRY)
     p.add_argument("--mlg-words", metavar="A,B,C", help="your own meme words")
+    from .mlg import MUSIC
+    p.add_argument("--mlg-music", choices=list(MUSIC),
+                   help="loop Sandstorm under the video (file in your sounds folder; see the README)")
     p.add_argument("--mlg-triple-text", metavar="TEXT")
     p.add_argument("--mlg-sfx-volume", type=float, metavar="X", help="sound effects volume (1 = normal)")
     p.add_argument("--mlg-airhorn-chance", type=float, metavar="0-1", help="share of single kills with a horn")
@@ -457,7 +460,8 @@ def add_look_args(p: argparse.ArgumentParser) -> None:
 def apply_look_args(a: argparse.Namespace, o) -> None:
     from .mlg import TOGGLES
     for k in ("grade", "mlg_intensity", "mlg_strobe", "mlg_deepfry", "mlg_words", "mlg_triple_text",
-              "mlg_sfx_volume", "mlg_airhorn_chance", "mlg_seed", "mlg_triple_sound", "mlg_airhorn_sound"):
+              "mlg_sfx_volume", "mlg_airhorn_chance", "mlg_seed", "mlg_triple_sound", "mlg_airhorn_sound",
+              "mlg_music"):
         if getattr(a, k, None) is not None:
             setattr(o, k, getattr(a, k))
     for k in ("letterbox", "vignette", "grain", "mlg"):

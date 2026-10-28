@@ -132,6 +132,17 @@ class ReelOptions:
     mlg_spin: bool = True
     mlg_shake: bool = True
     mlg_wub: bool = True
+    mlg_fbi: bool = True
+    mlg_wow: bool = True
+    mlg_what: bool = True
+    mlg_omgwow: bool = True
+    mlg_money_sound: bool = True
+    mlg_dota: bool = True
+    mlg_boompow: bool = True
+    mlg_headshot_sound: bool = True
+    mlg_mtndew_sound: bool = True
+    mlg_intro: bool = True
+    mlg_music: str = "off"                      # off | sandstorm | sandstorm_flute (from your sounds folder)
     mlg_siren: bool = False
     mlg_bassboost: bool = True
 
@@ -215,7 +226,7 @@ TEMPLATES: Dict[str, dict] = {
     "MLG lite": dict(_MLG, mlg_intensity="mild", mlg_strobe="light", mlg_deepfry="off", mlg_airhorn_chance=0.5,
                      mlg_hitflood=False, mlg_spin=False, mlg_bassboost=False, mlg_wub=False),
     "MLG MAX": dict(_MLG, mlg_intensity="max", mlg_deepfry="always", mlg_voices=True, mlg_smoke=True,
-                    mlg_siren=True, grade="Vivid"),
+                    mlg_siren=True, grade="Vivid", mlg_music="sandstorm"),
     "MLG 360 no scope": dict(_MLG, mlg_scope=True, mlg_spin=True, mlg_hitflood=True,
                              mlg_words="360 NO SCOPE,NO SCOPE,QUICKSCOPED,REKT,GET REKT,#rekt,ur dead m8"),
     "MLG sounds only": dict(_MLG, mlg_strobe="off", mlg_deepfry="off", mlg_cans=False, mlg_chips=False,
@@ -692,7 +703,11 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         names = []
         for k, ((t, _, g), inp) in enumerate(zip(sfx, sfx_inputs)):
             ms = int(round(t * 1000))
-            graph.append(f"[{inp}:a]aresample=48000,aformat=channel_layouts=stereo,volume={g:g},"
+            # trim leading silence so downloaded clips hit on the kill
+            cap = mlg.caps.get(sfx[k][1])
+            trim = (f",atrim=end={cap:.2f},afade=t=out:st={max(0.0, cap - 0.35):.2f}:d=0.35" if cap else "")
+            graph.append(f"[{inp}:a]aresample=48000,aformat=channel_layouts=stereo,"
+                         f"silenceremove=start_periods=1:start_threshold=-50dB{trim},volume={g:g},"
                          f"adelay={ms}|{ms}[sx{k}]")
             names.append(f"[sx{k}]")
         graph.append(f"[ag]{''.join(names)}amix=inputs={len(names) + 1}:duration=longest:normalize=0"
@@ -813,6 +828,12 @@ def build_reel(
             setattr(o, k, v)
     ffmpeg = ffmpeg or find_ffmpeg()
     gif = out_path.lower().endswith(".gif")
+    if o.mlg and not o.music and o.mlg_music not in ("", "off"):
+        from .mlg import my_sound
+        song = my_sound(o.mlg_music)
+        if song:                                 # Sandstorm under the montage, looped
+            o.music = song
+            o.music_volume = min(o.music_volume, 0.55)
     infos = {v: probe(v, ffmpeg) for v in {s.video for s in segments}}
     first = infos[segments[0].video]
     if o.size:
@@ -907,7 +928,7 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     for n, p in enumerate(parts):
         out = os.path.join(tmp, f"part{n:04d}.mp4")
         ovs = _overlay_specs(p, o, W, H, tmp, n)
-        fx = _mlg_plan(p, o, W, H, assets) if assets else None
+        fx = _mlg_plan(p, o, W, H, assets, first=n == 0) if assets else None
         cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades, fx)
         label = ("Replay: " if p.replay else "") + (p.seg.label or os.path.basename(p.seg.video))
         base = done
@@ -924,13 +945,13 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     return files
 
 
-def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets):
+def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = False):
     import random
     from .mlg import plan
     kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
     caps = [((t - p.start) / p.speed, c) for t, c in p.seg.captions]
     rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
-    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps)
+    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first)
 
 
 def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:

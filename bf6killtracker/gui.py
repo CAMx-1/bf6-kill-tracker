@@ -696,15 +696,22 @@ class MlgDialog(QDialog):
         vr.addWidget(self.sl_vol, 1)
         vr.addWidget(self.lbl_vol)
         form2.addRow("Sound effects volume", vr)
+        from .mlg import MUSIC
+        self.cb_music = QComboBox()
+        for k, label in MUSIC.items():
+            self.cb_music.addItem(label, k)
+        self.cb_music.setToolTip("Loops under the video when no other music is chosen (sandstorm.mp3 / "
+                                 "sandstorm_flute.mp3 in your sounds folder)")
+        form2.addRow("MLG music", self.cb_music)
         self.ed_words = QLineEdit()
         self.ed_words.setPlaceholderText("your own words, comma separated (empty = OH, WOW, GET REKT, 360 NO SCOPE…)")
         form2.addRow("Meme words", self.ed_words)
         self.ed_ttext = QLineEdit()
         form2.addRow("Triple text", self.ed_ttext)
         self.ed_snd: Dict[str, QLineEdit] = {}
-        for key, label, ph, kind in (("mlg_triple_sound", "Triple sound", "your own clip (empty = computer voice)",
+        for key, label, ph, kind in (("mlg_triple_sound", "Triple sound", "another file (empty = your sounds folder, else computer voice)",
                                       "triple"),
-                                     ("mlg_airhorn_sound", "Air horn sound", "your own file (empty = built-in real air horn)",
+                                     ("mlg_airhorn_sound", "Air horn sound", "another file (empty = your sounds folder, else built-in horn)",
                                       "airhorn")):
             row = QHBoxLayout()
             e = QLineEdit()
@@ -717,14 +724,32 @@ class MlgDialog(QDialog):
                 row.addWidget(w_, 1 if w_ is e else 0)
             self.ed_snd[key] = e
             form2.addRow(label, row)
-        srow = QHBoxLayout()
-        for kind, label in (("hit", "Hitmarker"), ("wub", "Wub"), ("boom", "Boom"), ("siren", "Siren"),
-                            ("voice", "Voice line")):
+        srow = QGridLayout()
+        for i, (kind, label) in enumerate((("hit", "Hitmarker"), ("wub", "Wub"), ("boom", "Explosion"), ("siren", "Siren"),
+                            ("fbi", "FBI"), ("wow", "WOW"),
+                            ("what", "WHAT"), ("money", "Money"), ("omgwow", "OMG WOW"),
+                            ("dotatriple", "TRIPLE KILL"), ("boompow", "BOOM POW"), ("headshot", "Headshot"),
+                            ("mtndew", "Mtn Dew baby"), ("pwnage", "Intro sting"), ("sandstorm", "Sandstorm"),
+                            ("sandstorm_flute", "Sandstorm flute"), ("voice", "Voice line"))):
             b = QPushButton("▶ " + label)
+            b.setToolTip("Listen")
             b.clicked.connect(lambda _=False, k=kind: self.listen(k))
-            srow.addWidget(b)
-        srow.addStretch(1)
-        form2.addRow("Built-in sounds", srow)
+            srow.addWidget(b, i // 6, i % 6)
+        form2.addRow("Sounds", srow)
+        from .mlg import my_sound, my_sounds_dir
+        from .mlg import MY_SOUNDS
+        found = [n for n in MY_SOUNDS if my_sound(n)]
+        mine = QHBoxLayout()
+        self.lbl_mine = QLabel(("Using yours: " + ", ".join(found)) if found else
+                               "Put triple / airhorn / explosion / fbi / wow / what / money / omgwow / boompow / sandstorm ... .mp3 here to use them in every video")
+        self.lbl_mine.setWordWrap(True)
+        self.lbl_mine.setToolTip("Files named triple, airhorn, explosion, fbi, wow, what, money, omgwow, dotatriple, boompow, hit, headshot, mtndew, pwnage, sandstorm or sandstorm_flute (.mp3/.wav/...) in this folder")
+        b_dir = QPushButton("Open my sounds folder")
+        b_dir.clicked.connect(lambda: (os.makedirs(my_sounds_dir(), exist_ok=True),
+                                       open_with_system(my_sounds_dir())))
+        mine.addWidget(self.lbl_mine, 1)
+        mine.addWidget(b_dir)
+        form2.addRow("My sounds", mine)
 
         btns = QHBoxLayout()
         b_pv = QPushButton("▶ Preview MLG")
@@ -757,6 +782,7 @@ class MlgDialog(QDialog):
         self.lbl_horn.setText(f"{self.sl_horn.value()} % of single kills")
         self.lbl_vol.setText(f"{self.sl_vol.value()} %")
         self.ed_words.setText(str(v["mlg_words"]))
+        self.cb_music.setCurrentIndex(max(0, self.cb_music.findData(v["mlg_music"])))
         self.ed_ttext.setText(str(v["mlg_triple_text"]))
         for k, e in self.ed_snd.items():
             e.setText(str(v.get(k, "")))
@@ -767,6 +793,7 @@ class MlgDialog(QDialog):
                  mlg_strobe=self.cb_strobe.currentData(), mlg_deepfry=self.cb_fry.currentData(),
                  mlg_seed=self.sp_seed.value(), mlg_airhorn_chance=self.sl_horn.value() / 100,
                  mlg_sfx_volume=self.sl_vol.value() / 100, mlg_words=self.ed_words.text(),
+                 mlg_music=self.cb_music.currentData(),
                  mlg_triple_text=self.ed_ttext.text() or "OH BABY A TRIPLE")
         for k, cb in self.toggles.items():
             v[k] = cb.isChecked()
@@ -793,13 +820,19 @@ class MlgDialog(QDialog):
             return a.triple_wav(t)
         if kind == "voice":
             return a.voice(_random.choice(VOICE_LINES))
+        if kind in ("headshot", "mtndew", "pwnage", "sandstorm", "sandstorm_flute"):
+            return a.mine(kind)
         return {"airhorn": a.airhorn_wav, "hit": a.hit_wav, "wub": a.wub_wav, "boom": a.boom_wav,
-                "siren": a.siren_wav}[kind]()
+                "siren": a.siren_wav, "fbi": a.fbi_wav, "wow": a.wow_wav,
+                "what": lambda: a.mine("what"), "money": lambda: a.mine("money"),
+                "omgwow": lambda: a.mine("omgwow"), "dotatriple": lambda: a.mine("dotatriple"),
+                "boompow": lambda: a.mine("boompow")}[kind]()
 
     def listen(self, kind: str) -> None:
         path = self.sound_path(kind)
         if not path:
-            QMessageBox.information(self, "No voice", "This computer has no built-in voice (on Linux install "
+            QMessageBox.information(self, "No sound", "Nothing to play: put fbi.mp3 in your sounds folder for FBI; "
+                                    "for voices, this computer has no built-in voice (on Linux install "
                                     "espeak-ng). Choose your own sound file instead.")
             return
         self.last_sound = path

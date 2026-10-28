@@ -214,6 +214,8 @@ def test_mlg_options_round_trip(app, video, tmp_path, monkeypatch):
     from bf6killtracker.gui import EffectsDialog, MlgDialog
     from bf6killtracker.mlg import TOGGLES
     monkeypatch.setenv("BF6KT_NO_OPEN", "1")
+    from bf6killtracker import mlg
+    monkeypatch.setattr(mlg, "my_sounds_dir", lambda: str(tmp_path / "mysounds"))
     w = MainWindow(QSettings(str(tmp_path / "mlg.ini"), QSettings.IniFormat))
     d = EffectsDialog(w, w.effects, {})
     d.cb_tpl.setCurrentIndex(d.cb_tpl.findData("MLG MAX"))

@@ -12,6 +12,14 @@ from bf6killtracker.reel import ReelOptions, Segment, TEMPLATES, apply_template,
 from bf6killtracker.video import find_ffmpeg, probe
 
 
+@pytest.fixture(autouse=True)
+def no_personal_sounds(tmp_path_factory, monkeypatch):
+    """Keep the developer's own sounds folder out of the tests."""
+    d = str(tmp_path_factory.mktemp("mysounds"))
+    monkeypatch.setattr(mlg, "my_sounds_dir", lambda: d)
+    return d
+
+
 def _alpha_cover(img):
     return float((np.asarray(img)[..., 3] > 0).mean())
 
@@ -254,3 +262,71 @@ def test_bundled_real_assets(tmp_path):
     assert red.mean() > 0.02                       # the red DEW of the logo is on the can
     own = mlg._write_wav(str(tmp_path / "mine.wav"), mlg.hit_wave())
     assert mlg.Assets(str(tmp_path / "b"), 640, 360, airhorn_sound=own).airhorn_wav() == own
+
+
+def test_my_sounds_folder_and_fbi(no_personal_sounds, tmp_path):
+    import shutil
+    d = no_personal_sounds
+    for n in mlg.MY_SOUNDS:
+        mlg._write_wav(os.path.join(d, n + ".wav"), np.concatenate([np.zeros(4800), mlg.hit_wave()]))
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360)
+    assert a.triple_wav() == os.path.join(d, "triple.wav") and a.airhorn_wav() == os.path.join(d, "airhorn.wav")
+    assert a.boom_wav() == os.path.join(d, "explosion.wav") and a.fbi_wav() == os.path.join(d, "fbi.wav")
+    chosen = mlg._write_wav(str(tmp_path / "chosen.wav"), mlg.hit_wave())
+    assert mlg.Assets(str(tmp_path / "b"), 640, 360, triple_sound=chosen).triple_wav() == chosen   # a pick wins
+    four = [(1.0, 1), (2.0, 1), (3.0, 1), (4.0, 1)]
+    p = mlg.plan(four, 8.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1))
+    assert any(f == a.fbi_wav() for _, f, _ in p.sfx)
+    hs = mlg.plan([(1.0, 1)], 3.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1),
+                  captions=[(1.0, "HEADSHOT · RIFLE")])
+    assert any(f == os.path.join(d, "wow.wav") for _, f, _ in hs.sfx)          # anime wow on headshots
+    mine = lambda n: os.path.join(d, n + ".wav")  # noqa: E731
+    dbl = mlg.plan([(1.0, 1), (2.5, 1), (8.0, 2)], 10.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1))
+    files = [f for _, f, _ in dbl.sfx]
+    assert mine("what") in files and mine("omgwow") in files and mine("money") in files
+    assert dbl.caps[mine("what")] == mlg.MY_SOUND_CAP["what"]
+    assert mine("boompow") in files                                       # 4 kills in the clip: finisher
+    tri = mlg.plan([(1.0, 1), (1.5, 1), (2.0, 1)], 8.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1))
+    at = {os.path.basename(f): t for t, f, _ in tri.sfx}
+    assert at["dotatriple.wav"] < at["triple.wav"]                           # announcer, then oh baby
+    assert "boompow.wav" not in at                                           # not over the triple
+    hs = mlg.plan([(1.0, 1)], 6.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1),
+                  captions=[(1.0, "HEADSHOT · RIFLE")], first=True)
+    at = {os.path.basename(f): t for t, f, _ in hs.sfx}
+    assert at["pwnage.wav"] == 0.0 and at["headshot.wav"] < at["wow.wav"] and "hit.wav" in at
+    p3 = mlg.plan(four[:3], 8.0, 640, 360, ReelOptions(mlg=True), a, random.Random(1))
+    assert not any(f == a.fbi_wav() for _, f, _ in p3.sfx)          # a triple isn't enough
+    shutil.rmtree(d)
+    os.makedirs(d)
+    assert mlg.Assets(str(tmp_path / "c"), 640, 360).fbi_wav() is None   # no file: no FBI
+
+
+def test_leading_silence_is_trimmed(no_personal_sounds, tmp_path):
+    """A downloaded clip with silence at the start still hits on the kill."""
+    src = str(tmp_path / "src.mp4")
+    _video(src, 4)
+    late = mlg._write_wav(os.path.join(no_personal_sounds, "airhorn.wav"),
+                          np.concatenate([np.zeros(int(0.8 * mlg.SR)), 0.9 * np.sign(np.sin(np.arange(mlg.SR) / 8))]))
+    assert late
+    out = str(tmp_path / "o.mp4")
+    o = ReelOptions(fade=0, transition="cut", mlg=True, mlg_strobe="off",
+                    **{k: k == "mlg_airhorn" for k in mlg.TOGGLES})
+    build_reel([Segment(src, 0.0, 4.0, "x", kills=[(1.0, 1)])], out, options=o)
+    x = _pcm(out)
+    rms = lambda t: float(np.sqrt(np.mean(x[int(t * 8000):int((t + 0.2) * 8000)] ** 2)))  # noqa: E731
+    assert rms(1.05) > 5 * rms(0.5)
+
+
+def test_sandstorm_music(no_personal_sounds, tmp_path):
+    src = str(tmp_path / "src.mp4")
+    _video(src, 3)
+    mlg._write_wav(os.path.join(no_personal_sounds, "sandstorm.wav"),
+                   0.5 * np.sin(2 * np.pi * 220 * np.arange(mlg.SR) / mlg.SR))   # 1 s: must loop
+    seg = Segment(src, 0.0, 3.0, "x")
+    plain, out = str(tmp_path / "p.mp4"), str(tmp_path / "m.mp4")
+    build_reel([seg], plain, options=ReelOptions(fade=0, mlg=True, mlg_strobe="off"))
+    build_reel([seg], out, options=ReelOptions(fade=0, mlg=True, mlg_strobe="off", mlg_music="sandstorm",
+                                               duck=False))
+    a, b = _pcm(plain), _pcm(out)
+    w = lambda x, t: float(np.sqrt(np.mean(x[int(t * 8000):int((t + 0.3) * 8000)] ** 2)))  # noqa: E731
+    assert w(b, 1.5) > 3 * w(a, 1.5)                 # still playing after the 1 s file ended
