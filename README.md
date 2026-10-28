@@ -89,7 +89,12 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - The cans and the flying logo use the real Mtn Dew logo, from Wikimedia Commons, where it's public domain as a text logo. Mtn Dew is a PepsiCo trademark, and this project isn't affiliated with PepsiCo.
   - The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original meme clips aren't included because they're copyrighted.
   - Sources are listed in `bf6killtracker/templates/mlg/SOURCES.txt`.
-- **Your sounds folder:** drop meme clips in here and MLG mode uses them automatically. **MLG settings… → Open my sounds folder** opens it.
+- **Meme sound pack:** 16 classic clips (Oh baby a triple, MLG air horn and hitmarker, FBI OPEN UP, Sandstorm…).
+  - They download automatically from myinstants.com the first time you open **MLG settings…** or build an MLG video, about 1.5 MB. **Download meme sounds** retries any that failed; offline, the built-in sounds are used.
+  - From the command line: `python -m bf6killtracker sounds`.
+  - They aren't shipped in the app or the repository because most are copyrighted; Sandstorm, for example, is a commercial song.
+  - Each file is checked against a SHA-256 checksum before it's saved.
+- **Your sounds folder:** the pack lands here, and you can replace any clip with your own by using the same name. **MLG settings… → Open my sounds folder** opens it.
   - Windows: `%LOCALAPPDATA%\bf6killtracker\sounds`; macOS: `~/Library/Caches/bf6killtracker/sounds`; Linux: `~/.cache/bf6killtracker/sounds`.
   - Name each file after its slot (`.mp3`, `.wav`, `.m4a`, `.ogg`… all work). Silence at the start is trimmed, and long clips fade out.
 
@@ -110,7 +115,7 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   | `pwnage` | Intro sting at the very start |
   | `sandstorm`, `sandstorm_flute` | Background music, chosen under **MLG music** or with `--mlg-music` (MLG MAX picks Sandstorm). It loops and only plays when no other music is chosen. |
 
-  Each slot has its own switch and ▶ Listen button in MLG settings.
+  Each slot has its own switch and ▶ Listen button in MLG settings. Listen plays inside the app: Windows' built-in player, or `afplay` on macOS.
 
 The app checks GitHub for new releases at start-up.
 

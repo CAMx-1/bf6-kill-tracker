@@ -828,6 +828,9 @@ def build_reel(
             setattr(o, k, v)
     ffmpeg = ffmpeg or find_ffmpeg()
     gif = out_path.lower().endswith(".gif")
+    if o.mlg:
+        from .soundpack import ensure
+        ensure()                                 # fetch the meme sound pack once, if it's missing
     if o.mlg and not o.music and o.mlg_music not in ("", "off"):
         from .mlg import my_sound
         song = my_sound(o.mlg_music)

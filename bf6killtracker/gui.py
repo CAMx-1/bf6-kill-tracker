@@ -195,6 +195,23 @@ class ReelWorker(Worker):
             self.failed.emit(str(exc))
 
 
+class SoundPackWorker(Worker):
+    progress = Signal(int, int, str)
+    done = Signal(dict)
+
+    def __init__(self, only_missing: bool = True):
+        super().__init__()
+        self.only_missing = only_missing
+
+    def run(self) -> None:
+        from .soundpack import download
+        try:
+            r = download(only_missing=self.only_missing, progress=lambda i, n, m: self.progress.emit(i, n, m))
+        except Exception as exc:
+            r = {"pack": str(exc)}
+        self.done.emit(r)
+
+
 class ThumbWorker(Worker):
     """Grabs small frames at each kill of a streak for the preview strip."""
     thumb = Signal(int, float, QImage)       # request id, time, image
@@ -737,17 +754,19 @@ class MlgDialog(QDialog):
             srow.addWidget(b, i // 6, i % 6)
         form2.addRow("Sounds", srow)
         from .mlg import my_sound, my_sounds_dir
-        from .mlg import MY_SOUNDS
-        found = [n for n in MY_SOUNDS if my_sound(n)]
         mine = QHBoxLayout()
-        self.lbl_mine = QLabel(("Using yours: " + ", ".join(found)) if found else
-                               "Put triple / airhorn / explosion / fbi / wow / what / money / omgwow / boompow / sandstorm ... .mp3 here to use them in every video")
+        self.lbl_mine = QLabel()
         self.lbl_mine.setWordWrap(True)
         self.lbl_mine.setToolTip("Files named triple, airhorn, explosion, fbi, wow, what, money, omgwow, dotatriple, boompow, hit, headshot, mtndew, pwnage, sandstorm or sandstorm_flute (.mp3/.wav/...) in this folder")
         b_dir = QPushButton("Open my sounds folder")
         b_dir.clicked.connect(lambda: (os.makedirs(my_sounds_dir(), exist_ok=True),
                                        open_with_system(my_sounds_dir())))
+        self.b_pack = QPushButton("Download meme sounds")
+        self.b_pack.setToolTip("Oh baby a triple, MLG air horn, FBI OPEN UP, Sandstorm… from myinstants.com "
+                               "into your sounds folder (not included in the app because they're copyrighted)")
+        self.b_pack.clicked.connect(self._pack_clicked)
         mine.addWidget(self.lbl_mine, 1)
+        mine.addWidget(self.b_pack)
         mine.addWidget(b_dir)
         form2.addRow("My sounds", mine)
 
@@ -767,7 +786,13 @@ class MlgDialog(QDialog):
         btns.addWidget(ok)
         lay.addLayout(btns)
         self.last_sound = ""
+        self._pack_worker = None
+        self.pack_result: dict = {}
         self._load(self.v)
+        self._pack_status()
+        from .soundpack import missing
+        if missing() and not os.environ.get("BF6KT_NO_SOUND_DOWNLOAD"):
+            self.download_pack()          # first time: fetch them automatically
 
     def _load(self, v: dict) -> None:
         self.cb_on.setChecked(bool(v["mlg"]))
@@ -829,6 +854,10 @@ class MlgDialog(QDialog):
                 "boompow": lambda: a.mine("boompow")}[kind]()
 
     def listen(self, kind: str) -> None:
+        if kind not in self._BUILT_IN and not self._have(kind):
+            QMessageBox.information(self, "Sound not downloaded",
+                                    "This meme sound isn't downloaded yet. Press “Download meme sounds”.")
+            return
         path = self.sound_path(kind)
         if not path:
             QMessageBox.information(self, "No sound", "Nothing to play: put fbi.mp3 in your sounds folder for FBI; "
@@ -836,8 +865,69 @@ class MlgDialog(QDialog):
                                     "espeak-ng). Choose your own sound file instead.")
             return
         self.last_sound = path
-        if not os.environ.get("BF6KT_NO_OPEN"):
+        if os.environ.get("BF6KT_NO_OPEN"):
+            return
+        from .mlg import play_sound
+        try:
+            how = play_sound(path)
+        except Exception:
+            how = ""
+        if not how:                      # no built-in player available: hand it to the default app
             open_with_system(path)
+
+    _BUILT_IN = ("hit", "wub", "boom", "siren", "voice", "triple", "airhorn")
+
+    @staticmethod
+    def _have(kind: str) -> bool:
+        from .mlg import my_sound
+        return bool(my_sound(kind))
+
+    # -- meme sound pack -------------------------------------------------------
+    def _pack_status(self) -> None:
+        from .soundpack import PACK, missing
+        miss = missing()
+        self.lbl_mine.setText(f"{len(PACK) - len(miss)} of {len(PACK)} meme sounds downloaded" if miss
+                              else f"All {len(PACK)} meme sounds downloaded")
+        self.b_pack.setText(f"Download meme sounds ({len(miss)})" if miss else "Re-download meme sounds")
+
+    def _pack_clicked(self) -> None:
+        from .soundpack import missing
+        self.download_pack(only_missing=bool(missing()))
+
+    def download_pack(self, only_missing: bool = True) -> None:
+        if self._pack_worker is not None:
+            return
+        w = SoundPackWorker(only_missing)
+        self._pack_worker = w
+        self.b_pack.setEnabled(False)
+        self.lbl_mine.setText("Downloading meme sounds…")
+
+        def wire(worker):
+            worker.progress.connect(lambda i, n, label: self.lbl_mine.setText(f"Downloading {label}… ({i}/{n})"))
+            worker.done.connect(self._pack_done)
+
+        mw = self.parent()
+        while mw is not None and not hasattr(mw, "_run_in_thread"):
+            mw = mw.parent()
+        if mw is not None:
+            mw._run_in_thread(w, wire)
+        else:                            # no main window: run here
+            wire(w)
+            w.start_work()
+
+    def _pack_done(self, result: dict) -> None:
+        self._pack_worker = None
+        self.b_pack.setEnabled(True)
+        self.pack_result = result
+        self._pack_status()
+        bad = [k for k, v in result.items() if v not in ("ok", "skipped")]
+        if bad:
+            self.lbl_mine.setText(self.lbl_mine.text() + f" — {len(bad)} couldn't be downloaded (no internet?)")
+
+    def done(self, r: int) -> None:  # noqa: D401 - QDialog override: stop any sound on close
+        from .mlg import stop_sound
+        stop_sound()
+        super().done(r)
 
     def _preview(self) -> None:
         p = self.parent()

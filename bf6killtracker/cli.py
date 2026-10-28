@@ -414,6 +414,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_look_args(pv)
     pv.set_defaults(func=cmd_preview)
 
+    so = sub.add_parser("sounds", help="download the MLG meme sound pack into your sounds folder")
+    so.add_argument("--force", action="store_true", help="download again even if present")
+    so.set_defaults(func=cmd_sounds)
+
     gu = sub.add_parser("gui", help="open the desktop app (default when run without arguments)")
     gu.add_argument("videos", nargs="*", help="videos to add on start")
     gu.set_defaults(func=lambda a: _gui(a.videos))
@@ -498,6 +502,17 @@ def cmd_preview(a: argparse.Namespace) -> int:
     build_reel([seg], a.output, options=o)
     print(f"wrote {a.output}")
     return 0
+
+
+def cmd_sounds(a: argparse.Namespace) -> int:
+    from .mlg import my_sounds_dir
+    from .soundpack import download
+    res = download(only_missing=not a.force,
+                   progress=lambda i, n, m: print(f"  {i + 1}/{n} {m}" if m != "done" else "", file=sys.stderr))
+    for slot, r in res.items():
+        print(f"{slot:16} {r}")
+    print(f"folder: {my_sounds_dir()}")
+    return 0 if all(r in ("ok", "skipped") for r in res.values()) else 1
 
 
 def _gui(videos: List[str]) -> int:

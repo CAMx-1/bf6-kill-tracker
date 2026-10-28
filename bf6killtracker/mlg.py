@@ -17,6 +17,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import wave
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -1096,3 +1097,58 @@ def strobe_filters(level: str, windows: Sequence[Tuple[float, float]], flashes: 
         vf += (f",eq=saturation=2.6:contrast=1.4:enable='{fon}',unsharp=7:7:2.5:enable='{fon}',"
                f"noise=alls=12:allf=t:enable='{fon}'")
     return vf
+
+
+# ------------------------------------------------------------------ listening
+_player: Optional[subprocess.Popen] = None
+
+
+def _as_wav(path: str) -> str:
+    """A 16-bit WAV copy of ``path`` (Windows' winsound and aplay only play WAV)."""
+    import hashlib
+    from .video import NO_WINDOW, find_ffmpeg
+    if path.lower().endswith(".wav"):
+        return path
+    st = os.stat(path)
+    key = hashlib.md5(f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime}".encode()).hexdigest()[:12]
+    out = os.path.join(tempfile.gettempdir(), "bf6kt_listen", key + ".wav")
+    if not os.path.isfile(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-i", path, "-ac", "2", "-ar", "44100",
+                        "-c:a", "pcm_s16le", out], check=True, timeout=30, stdin=subprocess.DEVNULL, **NO_WINDOW)
+    return out
+
+
+def play_sound(path: str) -> str:
+    """Play a sound file now (stops the previous one). Returns how: "winsound", "afplay", ... or ""."""
+    global _player
+    stop_sound()
+    if not path or not os.path.isfile(path):
+        return ""
+    from .video import NO_WINDOW
+    if sys.platform == "win32":
+        import winsound
+        winsound.PlaySound(_as_wav(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+        return "winsound"
+    cmds = [["afplay", path]] if sys.platform == "darwin" else []
+    cmds += [["paplay", _as_wav(path)], ["aplay", "-q", _as_wav(path)],
+             ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", path]]
+    for cmd in cmds:
+        if shutil.which(cmd[0]):
+            _player = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, **NO_WINDOW)
+            return cmd[0]
+    return ""
+
+
+def stop_sound() -> None:
+    global _player
+    if sys.platform == "win32":
+        try:
+            import winsound
+            winsound.PlaySound(None, 0)
+        except Exception:
+            pass
+    if _player is not None and _player.poll() is None:
+        _player.kill()
+    _player = None
