@@ -83,7 +83,12 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - **Event effects** are switched on only where they apply: triple effects, FBI, the headshot scope and voice, explosions, WHAT?! and money rain.
   - **Air horns** happen less often when there are lots of kills.
   - **Music:** Sandstorm, or the flute version for short videos, unless you picked your own song.
-  - **Scale chaos to each clip** gives quiet clips mild effects and the big moments everything. The **MLG auto (fits your clips)** template does all of this when you build.
+  - **Volume:** it measures how loud your game audio is and turns the effects up or down to match.
+  - **Scale chaos to each clip** gives quiet clips mild effects and the big moments everything. The **MLG auto (fits your clips)** template does all of this when you build. With it on:
+    - the reel builds up: the last third is at least normal and the finale is always max;
+    - the same gag (WHAT?!, OMG WOW, Mtn Dew baby, money, wow) isn't used in two clips in a row;
+    - BOOM BAM POW is saved for the finale.
+- **Voices take turns:** only one meme voice plays at a time. The more important line keeps its moment ("TRIPLE KILL!" → "oh baby a triple" → "FBI OPEN UP"), and the others wait up to 1 s or are skipped. The game audio dips while a voice talks so you can hear it. Slow-motion replays keep the visuals and horns but don't repeat the voice lines.
 - **Timing:** every sound is placed so its punch lands on the kill. The app measures each clip's attack, so a voice line that starts with a breath is started a little earlier. A repeated sound cuts the previous one off. Clips are joined with uncompressed audio, which removed a drift of about 30 ms per clip. Over a 12-clip reel the sound stays within 1 ms of the kill.
 - **MLG settings…** has 20 on/off switches, including optional voice lines ("wow", "get rekt"…), rainbow smoke and a siren. It also has:
   - **Chaos:** mild, normal or max.

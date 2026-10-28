@@ -874,7 +874,12 @@ class MlgDialog(QDialog):
             self.lbl_why.setVisible(True)
             return []
         has_music = bool(mw.ed_music.text()) if hasattr(mw, "ed_music") else False
-        vals, why = _suggest([ClipFacts(list(s.kills), list(s.captions), s.duration) for s in segs], has_music)
+        from .mlg import game_loudness
+        self.lbl_why.setText("Listening to your clips…")
+        self.lbl_why.setVisible(True)
+        QApplication.processEvents()
+        vals, why = _suggest([ClipFacts(list(s.kills), list(s.captions), s.duration) for s in segs], has_music,
+                             game_db=game_loudness(segs))
         cur = self.values()
         cur.update(vals)
         self.v = cur

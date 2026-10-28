@@ -69,7 +69,7 @@ MUSIC = {"off": "None", "sandstorm": "Darude - Sandstorm", "sandstorm_flute": "S
 # longest stretch of each of your sounds to play (s); longer files fade out
 MY_SOUND_CAP = {"triple": 5.0, "airhorn": 3.0, "explosion": 3.0, "fbi": 7.5, "wow": 3.0, "what": 3.0,
                 "money": 3.0, "omgwow": 3.5, "dotatriple": 2.5, "boompow": 4.5, "hit": 0.6, "headshot": 3.0,
-                "mtndew": 2.5, "pwnage": 7.0}
+                "mtndew": 2.5, "pwnage": 4.0}
 
 
 def my_sounds_dir() -> str:
@@ -632,6 +632,7 @@ class Assets:
         self.user_airhorn = airhorn_sound if airhorn_sound and os.path.isfile(airhorn_sound) else my_sound("airhorn")
         self.user_triple = triple_sound if triple_sound and os.path.isfile(triple_sound) else my_sound("triple")
         self._cache: Dict[str, Optional[str]] = {}
+        self.prev_flavor: set = set()            # gag sounds the previous clip used (auto mode: vary them)
         os.makedirs(folder, exist_ok=True)
 
     def _img(self, key: str, make) -> str:
@@ -802,6 +803,7 @@ class Plan:
     af: str = ""                                                         # filters after the sound mix
     caps: Dict[str, float] = field(default_factory=dict)                 # file -> longest stretch to play
     lens: List[Optional[float]] = field(default_factory=list)            # per sfx: cut off here (choke)
+    duck: List[Tuple[float, float]] = field(default_factory=list)        # game audio dips under voice lines
     vf_post: str = ""                                                    # filters on the finished picture
     triples: List[float] = field(default_factory=list)
 
@@ -827,9 +829,86 @@ def _b(a: float, b: float) -> str:
     return f"between(t\\,{a:.3f}\\,{b:.3f})"
 
 
+# spoken / sung clips: only one at a time, the game dips under them
+VOICE_SLOTS = {"triple", "dotatriple", "headshot", "wow", "omgwow", "what", "mtndew", "fbi", "boompow"}
+# gags that get old if every clip has them (auto mode skips one the previous clip used)
+FLAVOR_SLOTS = {"what", "omgwow", "mtndew", "money", "wow"}
+
+
+def _slot(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def is_voice(path: str, o=None) -> bool:
+    if _slot(path) in VOICE_SLOTS or _slot(path).startswith("voice_"):
+        return True
+    return bool(o is not None and path and path == getattr(o, "mlg_triple_sound", ""))
+
+
+_tails: Dict[str, float] = {}
+
+
+def audible_length(path: str) -> float:
+    """Seconds until the sound has really finished (last moment above 20 % of its peak), silence trimmed."""
+    if path in _tails:
+        return _tails[path]
+    val = 0.0
+    try:
+        from .video import NO_WINDOW, find_ffmpeg
+        raw = subprocess.run([find_ffmpeg(), "-v", "error", "-i", path, "-t", "12", "-af",
+                              "silenceremove=start_periods=1:start_threshold=-50dB", "-ac", "1", "-ar", "8000",
+                              "-f", "f32le", "-"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                             **NO_WINDOW).stdout
+        x = np.abs(np.frombuffer(raw, np.float32))
+        if len(x) > 8:
+            k = max(1, min(400, len(x) // 4))
+            env = np.convolve(x, np.ones(k) / k, "same")
+            loud = np.flatnonzero(env >= 0.2 * env.max())
+            val = float(loud[-1] / 8000) if len(loud) else 0.0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        val = 0.0
+    _tails[path] = val
+    return val
+
+
+# how long a voice keeps the floor: the spoken line, not the crowd/echo after it (others may play over that)
+VOICE_HOLD = {"triple": 2.0, "dotatriple": 1.4, "headshot": 2.4, "wow": 1.6, "omgwow": 1.6, "what": 1.2,
+              "mtndew": 1.6, "fbi": 3.2, "boompow": 4.5}
+
+
+def voice_length(path: str) -> float:
+    cap = min(MY_SOUND_CAP.get(_slot(path), 3.0), VOICE_HOLD.get(_slot(path), 2.0))
+    n = audible_length(path) or sound_length(path)
+    return min(cap, n + 0.1 if n > 0 else cap)
+
+
+def schedule_voices(sfx: Sequence[Tuple[float, str, float, int]], dur: float, o=None, max_delay: float = 1.0,
+                    gap: float = 0.08):
+    """Voices never talk over each other: by priority, each one takes the first free slot (up to
+    ``max_delay`` late) or is dropped. Returns (sounds, [(start, end)] voice windows for ducking)."""
+    voices = sorted((s for s in sfx if is_voice(s[1], o)), key=lambda s: (s[3], s[0]))
+    others = [s for s in sfx if not is_voice(s[1], o)]
+    taken: List[Tuple[float, float]] = []
+    kept = []
+    for t, f, g, pr in voices:
+        ln = voice_length(f)
+        start = t
+        for a, b in sorted(taken):
+            if start < b + gap and start + ln > a - gap:        # overlaps: try right after it
+                start = b + gap
+        if any(start < b + gap and start + ln > a - gap for a, b in taken):
+            continue
+        if start - t > max_delay or start >= dur:
+            continue
+        taken.append((start, start + ln))
+        kept.append((start, f, g, pr))
+    return others + kept, sorted(taken)
+
+
 def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, assets: Assets,
          rng: random.Random, triples: Optional[Sequence[float]] = None,
-         captions: Sequence[Tuple[float, str]] = (), first: bool = False) -> Plan:
+         captions: Sequence[Tuple[float, str]] = (), first: bool = False, last: bool = False,
+         replay: bool = False) -> Plan:
     """Stickers, sounds and filters for one clip. ``kills``/``captions`` are in clip time."""
     D = defaults()
     on = lambda k: bool(getattr(o, k, D.get(k)))  # noqa: E731
@@ -865,7 +944,13 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
     def until(t: float, s: float) -> float:
         return min(dur, t + s)
 
+    auto = bool(getattr(o, "mlg_auto", False))
+
     def snd(t: float, f: Optional[str], g: float, prio: int = 5) -> None:
+        if f and replay and is_voice(f, o):          # slow-mo replay: the lines were said the first time
+            return
+        if f and auto and f in assets.prev_flavor and _slot(f) in FLAVOR_SLOTS:   # not the same gag twice
+            return
         if f:
             t = max(0.0, t - sound_onset(f))            # start early by the clip's attack time
             if t < dur:
@@ -1013,9 +1098,9 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
             fry.append((t, until(t, 2.4)))
 
     if first and on("mlg_intro"):
-        snd(0.0, assets.mine("pwnage"), 0.8, 0)
+        snd(0.0, assets.mine("pwnage"), 0.6, 6)          # a sting under the start; event voices win
 
-    boom = assets.mine("boompow") if on("mlg_boompow") else None
+    boom = assets.mine("boompow") if on("mlg_boompow") and (last or not auto) else None
     if boom and sum(c for _, c in ks) >= 3:
         t = ks[-1][0]
         busy = [tr for tr in trip if -0.5 < t - tr < 5.0]          # don't talk over the triple
@@ -1043,6 +1128,7 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
     pl.stickers.sort(key=lambda s: s.prio)
     pl.stickers = pl.stickers[:lvl["max_stickers"]]
     pl.stickers.sort(key=lambda s: s.layer)
+    pl.sfx, pl.duck = schedule_voices(pl.sfx, dur, o)                    # type: ignore[arg-type]
     sfx = sorted(pl.sfx, key=lambda s: s[3])[:lvl["max_sfx"]]           # type: ignore[index]
     pl.sfx = sorted(((t, f, g) for t, f, g, _ in sfx), key=lambda s: s[0])  # type: ignore[misc]
     mine = {my_sound(n): cap for n, cap in MY_SOUND_CAP.items() if my_sound(n)}
@@ -1057,6 +1143,9 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         pl.lens.append(max(0.08, nxt - t) if nxt is not None else None)
     pl.vf = strobe_filters(getattr(o, "mlg_strobe", "normal"), strobe, flashes, fry)
     pl.vf_post = motion_filters(W, H, spins, shake)          # spin/shake everything, stickers included
+    used = {f for _, f, _ in pl.sfx if _slot(f) in FLAVOR_SLOTS}
+    assets.prev_flavor = used                                # the next clip avoids these
+    pl.duck = [(a, b) for a, b in pl.duck if any(abs(t - a) < 1e-6 for t, _, _ in pl.sfx)]
     if bass:
         en = "+".join(_b(a, b) for a, b in bass)
         pl.af = f",bass=g=14:f=90:enable='{en}',volume=1.6:enable='{en}',asoftclip=type=hard:enable='{en}'"
@@ -1219,7 +1308,27 @@ def clip_level(kills: Sequence[Tuple[float, int]]) -> str:
     return "mild"
 
 
-def suggest(clips: Sequence[ClipFacts], has_music: bool = False) -> Tuple[Dict[str, object], List[str]]:
+def game_loudness(segments, max_clips: int = 12, max_s: float = 8.0) -> Optional[float]:
+    """Average loudness (mean dB) of the game audio in up to ``max_clips`` segments, or None."""
+    import re
+    from .video import NO_WINDOW, find_ffmpeg
+    vals = []
+    for sg in list(segments)[:max_clips]:
+        try:
+            r = subprocess.run([find_ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{sg.start:.2f}", "-t",
+                                f"{min(max_s, max(0.5, sg.end - sg.start)):.2f}", "-i", sg.video, "-vn",
+                                "-af", "volumedetect", "-f", "null", "-"], capture_output=True, text=True,
+                               errors="replace", timeout=60, stdin=subprocess.DEVNULL, **NO_WINDOW)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", r.stderr)
+        if m and float(m.group(1)) > -90:
+            vals.append(float(m.group(1)))
+    return float(np.mean(vals)) if vals else None
+
+
+def suggest(clips: Sequence[ClipFacts], has_music: bool = False,
+            game_db: Optional[float] = None) -> Tuple[Dict[str, object], List[str]]:
     """MLG settings that fit these clips, with the reasons (for the "Suggest" button and the MLG auto template)."""
     v: Dict[str, object] = {"mlg": True}
     why: List[str] = []
@@ -1240,7 +1349,7 @@ def suggest(clips: Sequence[ClipFacts], has_music: bool = False) -> Tuple[Dict[s
     why.append(f"{kills} kills in {dur:.0f} s ({dens:.2f}/s) → {lvl} chaos")
     v["mlg_auto"] = len(clips) > 1
     if len(clips) > 1:
-        why.append(f"{len(clips)} clips → chaos scales with each clip (big moments get more)")
+        why.append(f"{len(clips)} clips → chaos follows each clip and builds up to the finale")
     v["mlg_strobe"] = "normal" if trip else "light"
     v["mlg_deepfry"] = "triples" if trip else "off"
     for k in ("mlg_triple", "mlg_ohscreen", "mlg_spin", "mlg_hitflood", "mlg_bassboost", "mlg_dota",
@@ -1269,6 +1378,11 @@ def suggest(clips: Sequence[ClipFacts], has_music: bool = False) -> Tuple[Dict[s
     if dens < 0.15:
         why.append("Kills are spread out → voice lines fill the gaps")
     v["mlg_smoke"] = v["mlg_siren"] = lvl == "max"
+    if game_db is not None:
+        vol = 1.3 if game_db > -17 else (0.8 if game_db < -30 else 1.0)
+        v["mlg_sfx_volume"] = vol
+        if vol != 1.0:
+            why.append(f"Game audio is {'loud' if vol > 1 else 'quiet'} ({game_db:.0f} dB) → effects at {int(vol * 100)} %")
     if has_music:
         v["mlg_music"] = "off"
         why.append("You chose music → no Sandstorm")

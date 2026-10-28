@@ -381,3 +381,58 @@ def test_reel_audio_stays_in_sync_over_many_clips(tmp_path):
         last = i / 8000
     assert len(flashes) == len(clicks) == 12
     assert max(abs(c - f) for f, c in zip(flashes, clicks)) < 0.04
+
+
+def test_voices_never_overlap_and_game_ducks(no_personal_sounds, tmp_path):
+    d = no_personal_sounds
+    for n in mlg.MY_SOUNDS:
+        mlg._write_wav(os.path.join(d, n + ".wav"), 0.8 * np.sign(np.sin(np.arange(int(1.5 * mlg.SR)) / 9)))
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360)
+    kills = [(1.0, 1), (1.4, 1), (1.8, 1), (2.2, 1), (6.0, 2)]
+    caps = [(1.0, "HEADSHOT · RIFLE"), (6.0, "C4")]
+    pl = mlg.plan(kills, 10.0, 640, 360, ReelOptions(mlg=True), a, random.Random(2), captions=caps)
+    vs = sorted((t, mlg.voice_length(f)) for t, f, _ in pl.sfx if mlg.is_voice(f))
+    assert len(vs) >= 3
+    assert all(t1 + ln1 <= t2 + 1e-6 for (t1, ln1), (t2, _) in zip(vs, vs[1:]))       # one at a time
+    assert len(pl.duck) == len(vs)
+    rp = mlg.plan(kills, 10.0, 640, 360, ReelOptions(mlg=True), a, random.Random(2), captions=caps, replay=True)
+    assert not any(mlg.is_voice(f) for _, f, _ in rp.sfx) and any(f == a.airhorn_wav() for _, f, _ in rp.sfx)
+
+
+def test_schedule_voices_shifts_or_drops():
+    import tempfile
+    d = tempfile.mkdtemp()
+    w = mlg._write_wav(os.path.join(d, "what.wav"), 0.8 * np.ones(mlg.SR))       # 1 s line (hold 1.2 s cap)
+    t = mlg._write_wav(os.path.join(d, "triple.wav"), 0.8 * np.ones(mlg.SR))
+    out, win = mlg.schedule_voices([(1.0, w, 1, 3), (1.2, t, 1, 0), (5.0, w, 1, 3)], 10.0)
+    starts = sorted((round(x, 2), mlg._slot(f)) for x, f, _, _ in out)
+    assert starts[0] == (1.2, "triple")                  # the important line keeps its moment
+    assert (2.38, "what") in [(round(x, 2), s) for x, s in starts] or len(starts) == 2   # shifted after, or dropped
+    assert (5.0, "what") in starts and len(win) == len(out)
+
+
+def test_auto_variety_and_build_up(no_personal_sounds, tmp_path):
+    from bf6killtracker import reel
+    d = no_personal_sounds
+    for n in mlg.MY_SOUNDS:
+        mlg._write_wav(os.path.join(d, n + ".wav"), 0.5 * np.ones(int(0.5 * mlg.SR)))
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360)
+    o = ReelOptions(mlg=True, mlg_auto=True)
+    dbl = [(2.0, 2)]
+    p1 = mlg.plan(dbl, 6.0, 640, 360, o, a, random.Random(1))
+    p2 = mlg.plan(dbl, 6.0, 640, 360, o, a, random.Random(1))
+    slots = lambda p: {mlg._slot(f) for _, f, _ in p.sfx}  # noqa: E731
+    assert "what" in slots(p1) and "what" not in slots(p2)            # same gag not twice in a row
+    seg = Segment("x.mp4", 0, 6, "x", [(2.0, 1)])
+    lvl = lambda **k: reel._mlg_plan(reel._Part(seg, 0, 6), o, 640, 360,   # noqa: E731
+                                     mlg.Assets(str(tmp_path / "b"), 640, 360), **k)
+    assert len(lvl(last=True).stickers) > len(lvl(pos=0.0).stickers)   # the finale gets more
+    assert not [f for _, f, _ in mlg.plan([(1, 1), (2, 1), (3, 1)], 6, 640, 360, o, a, random.Random(1)).sfx
+                if mlg._slot(f) == "boompow"]                              # finisher only on the last clip
+
+
+def test_suggest_uses_game_loudness():
+    clip = mlg.ClipFacts([(2.0, 1)], [], 8.0)
+    assert mlg.suggest([clip], game_db=-12)[0]["mlg_sfx_volume"] == 1.3
+    assert mlg.suggest([clip], game_db=-35)[0]["mlg_sfx_volume"] == 0.8
+    assert "mlg_sfx_volume" not in mlg.suggest([clip])[0]

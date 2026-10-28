@@ -704,6 +704,9 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     if fade_d > 0:
         af += f",afade=t=in:st=0:d={fade_d:.3f},afade=t=out:st={d - fade_d:.3f}:d={fade_d:.3f}"
     if sfx:
+        if mlg.duck:                    # game audio dips under the meme voices so they're heard
+            on = "+".join(f"between(t\\,{a:.3f}\\,{b:.3f})" for a, b in mlg.duck)
+            af += f",volume=0.4:enable='{on}'"
         graph.append(af + "[ag]")
         names = []
         for k, ((t, _, g), inp) in enumerate(zip(sfx, sfx_inputs)):
@@ -841,9 +844,9 @@ def build_reel(
         from .soundpack import ensure
         ensure()                                 # fetch the meme sound pack once, if it's missing
     if o.mlg and o.mlg_suggest:
-        from .mlg import ClipFacts, suggest
+        from .mlg import ClipFacts, game_loudness, suggest
         vals, _ = suggest([ClipFacts(list(sg.kills), list(sg.captions), sg.duration) for sg in segments],
-                          has_music=bool(o.music))
+                          has_music=bool(o.music), game_db=game_loudness(segments))
         for k, val in vals.items():
             setattr(o, k, val)
     if o.mlg and not o.music and o.mlg_music not in ("", "off"):
@@ -949,7 +952,9 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     for n, p in enumerate(parts):
         out = os.path.join(tmp, f"part{n:04d}.mov")
         ovs = _overlay_specs(p, o, W, H, tmp, n)
-        fx = _mlg_plan(p, o, W, H, assets, first=n == 0) if assets else None
+        last_real = max(i for i, q in enumerate(parts) if not q.replay)
+        fx = _mlg_plan(p, o, W, H, assets, first=n == 0, last=n >= last_real,
+                       pos=n / max(1, len(parts) - 1)) if assets else None
         cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades, fx)
         label = ("Replay: " if p.replay else "") + (p.seg.label or os.path.basename(p.seg.video))
         base = done
@@ -966,18 +971,22 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     return files
 
 
-def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = False):
+def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = False, last: bool = False,
+              pos: float = 0.0):
     import random
     from .mlg import clip_level, plan
     if o.mlg_auto:
         lvl = clip_level(p.seg.kills)
+        ladder = ("mild", "normal", "max")
+        floor = 2 if last else (1 if pos >= 0.66 else 0)          # build up to the finale
+        lvl = ladder[max(ladder.index(lvl), floor)]
         order = ("off", "light", "normal", "max")
         strobe = o.mlg_strobe if lvl != "mild" else order[min(order.index(o.mlg_strobe), 1)]
         o = replace(o, mlg_intensity=lvl, mlg_strobe=strobe)
     kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
     caps = [((t - p.start) / p.speed, c) for t, c in p.seg.captions]
     rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
-    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first)
+    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first, last=last, replay=p.replay)
 
 
 # audio of the intermediate clips: uncompressed, so joined clips add up to exactly their lengths
