@@ -118,6 +118,38 @@ def sound_length(path: str) -> float:
     return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else 0.0
 
 
+_onsets: Dict[Tuple[str, float, float], float] = {}
+
+
+def sound_onset(path: str, max_s: float = 0.35, level: float = 0.5, seconds: float = 3.0) -> float:
+    """Seconds from the first audible sample (where leading silence is trimmed) to the sound's punch
+    (first moment at ``level`` of its peak). Sounds are started this much early so the punch hits the kill."""
+    if not path:
+        return 0.0
+    key = (path, level, seconds)
+    if key in _onsets:
+        return min(max_s, _onsets[key])
+    val = 0.0
+    try:
+        from .video import NO_WINDOW, find_ffmpeg
+        raw = subprocess.run([find_ffmpeg(), "-v", "error", "-i", path, "-t", f"{seconds:g}", "-ac", "1", "-ar", "8000",
+                              "-f", "f32le", "-"], capture_output=True, timeout=20, stdin=subprocess.DEVNULL,
+                             **NO_WINDOW).stdout
+        x = np.abs(np.frombuffer(raw, np.float32))
+        if len(x) > 80:
+            w = 40                                         # 5 ms envelope
+            env = np.convolve(x, np.ones(w) / w, "same")
+            start = int(np.argmax(x > 10 ** (-50 / 20)))   # same threshold as silenceremove
+            peak = env.max()
+            if peak > 0:
+                hit = int(np.argmax(env >= level * peak))
+                val = float(max(0.0, (hit - start) / 8000))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        val = 0.0
+    _onsets[key] = val
+    return min(max_s, val)
+
+
 def mtn_dew_logo(width: int) -> Optional[Image.Image]:
     p = bundled("mtn_dew_logo.png")
     if not p:
@@ -740,7 +772,7 @@ TOGGLES: Dict[str, Tuple[str, bool, str]] = {
 def defaults() -> Dict[str, object]:
     """All MLG settings with their default values (also used by the GUI)."""
     d: Dict[str, object] = {k: v[1] for k, v in TOGGLES.items()}
-    d.update(mlg=False, mlg_music="off", mlg_intensity="normal", mlg_strobe="normal", mlg_deepfry="triples", mlg_seed=0,
+    d.update(mlg=False, mlg_auto=False, mlg_suggest=False, mlg_music="off", mlg_intensity="normal", mlg_strobe="normal", mlg_deepfry="triples", mlg_seed=0,
              mlg_airhorn_chance=1.0, mlg_sfx_volume=1.0, mlg_words="", mlg_triple_text=TRIPLE_TEXT,
              mlg_triple_sound="", mlg_airhorn_sound="")
     return d
@@ -769,6 +801,7 @@ class Plan:
     vf: str = ""                                                         # filters for the main video chain
     af: str = ""                                                         # filters after the sound mix
     caps: Dict[str, float] = field(default_factory=dict)                 # file -> longest stretch to play
+    lens: List[Optional[float]] = field(default_factory=list)            # per sfx: cut off here (choke)
     vf_post: str = ""                                                    # filters on the finished picture
     triples: List[float] = field(default_factory=list)
 
@@ -833,8 +866,10 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         return min(dur, t + s)
 
     def snd(t: float, f: Optional[str], g: float, prio: int = 5) -> None:
-        if f and 0 <= t < dur:
-            pl.sfx.append((t, f, g * vol, prio))  # type: ignore[arg-type]
+        if f:
+            t = max(0.0, t - sound_onset(f))            # start early by the clip's attack time
+            if t < dur:
+                pl.sfx.append((t, f, g * vol, prio))  # type: ignore[arg-type]
 
     for t, c in ks:
         headshot = cap_near(t, "HEADSHOT")
@@ -996,7 +1031,8 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         if t + 2.0 > dur:   # no time left for the shout (at +1.6 s)
             continue
         snd(t, fbi, 1.0, 0)
-        hit_at = t + 1.6                         # the shout/breach (leading silence is trimmed)
+        shout = sound_onset(fbi, max_s=6.0, level=0.85, seconds=8.0)     # the loudest bit: "OPEN UP!"
+        hit_at = t + (shout if 0.3 < shout < 6.0 else 1.6)
         txt = assets.text("FBI OPEN UP!", "blue", 0.16)
         pl.stickers.append(Sticker(txt, f"{W}/2-w/2+{W // 70}*sin(t*45)", f"{H * 0.22:.0f}", hit_at,
                                    until(hit_at, 1.8), rot="0.05*sin(t*20)", prio=0, layer=5))
@@ -1014,6 +1050,11 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         if user:
             mine[user] = MY_SOUND_CAP[n]
     pl.caps = {f: mine[f] for _, f, _ in pl.sfx if f in mine}
+    # choke: the same sound again cuts the previous one short, so every kill gets a clean hit
+    pl.lens = []
+    for i, (t, f, _) in enumerate(pl.sfx):
+        nxt = next((t2 for t2, f2, _ in pl.sfx[i + 1:] if f2 == f), None)
+        pl.lens.append(max(0.08, nxt - t) if nxt is not None else None)
     pl.vf = strobe_filters(getattr(o, "mlg_strobe", "normal"), strobe, flashes, fry)
     pl.vf_post = motion_filters(W, H, spins, shake)          # spin/shake everything, stickers included
     if bass:
@@ -1158,3 +1199,80 @@ def stop_sound() -> None:
     if _player is not None and _player.poll() is None:
         _player.kill()
     _player = None
+
+
+# ------------------------------------------------------------------ suggestions
+@dataclass
+class ClipFacts:
+    kills: List[Tuple[float, int]]                    # (time, count)
+    captions: List[Tuple[float, str]] = field(default_factory=list)
+    duration: float = 0.0
+
+
+def clip_level(kills: Sequence[Tuple[float, int]]) -> str:
+    """How much chaos a clip deserves: "mild", "normal" or "max"."""
+    n = sum(c for _, c in kills)
+    if find_triples(kills) or n >= 6:          # the moments the montage is about
+        return "max"
+    if n >= 2:
+        return "normal"
+    return "mild"
+
+
+def suggest(clips: Sequence[ClipFacts], has_music: bool = False) -> Tuple[Dict[str, object], List[str]]:
+    """MLG settings that fit these clips, with the reasons (for the "Suggest" button and the MLG auto template)."""
+    v: Dict[str, object] = {"mlg": True}
+    why: List[str] = []
+    kills = sum(c for cl in clips for _, c in cl.kills)
+    dur = sum(cl.duration for cl in clips) or 1.0
+    dens = kills / dur
+    trip = sum(len(find_triples(cl.kills)) for cl in clips)
+    quad = sum(len(find_triples(cl.kills, window=6.0, gap=8.0, need=4)) for cl in clips)
+    caps = [c.upper() for cl in clips for _, c in cl.captions]
+    hs = sum("HEADSHOT" in c for c in caps)
+    boom = sum(any(w in c for w in ("EXPLOSIVE", "C4", "GRENADE", "ROCKET")) for c in caps)
+    multi = sum(1 for cl in clips for _, c in cl.kills if c >= 2)
+    if not kills:
+        return v, ["No kills in the selected clips, so there's nothing to react to."]
+
+    lvl = "max" if quad or dens > 0.45 else ("normal" if trip or dens > 0.2 else "mild")
+    v["mlg_intensity"] = lvl
+    why.append(f"{kills} kills in {dur:.0f} s ({dens:.2f}/s) → {lvl} chaos")
+    v["mlg_auto"] = len(clips) > 1
+    if len(clips) > 1:
+        why.append(f"{len(clips)} clips → chaos scales with each clip (big moments get more)")
+    v["mlg_strobe"] = "normal" if trip else "light"
+    v["mlg_deepfry"] = "triples" if trip else "off"
+    for k in ("mlg_triple", "mlg_ohscreen", "mlg_spin", "mlg_hitflood", "mlg_bassboost", "mlg_dota",
+              "mlg_illuminati", "mlg_shades"):
+        v[k] = bool(trip)
+    why.append(f"{trip} triple(s) → OH BABY A TRIPLE, OHHHH screen, 360 spin, strobe flashes" if trip else
+               "No triples → no triple effects; strobe colour only (no flashes)")
+    v["mlg_fbi"] = bool(quad)
+    if quad:
+        why.append(f"{quad} burst(s) of 4+ kills → FBI OPEN UP")
+    v["mlg_scope"] = v["mlg_headshot_sound"] = v["mlg_wow"] = bool(hs)
+    if hs:
+        why.append(f"{hs} headshot(s) → sniper scope, headshot voice, anime wow")
+    v["mlg_explosions"] = bool(boom or multi)
+    if boom:
+        why.append(f"{boom} explosive kill(s) → fireballs + boom")
+    v["mlg_extras"] = v["mlg_money_sound"] = v["mlg_what"] = bool(multi or trip)
+    v["mlg_wub"] = bool(multi)
+    if multi:
+        why.append(f"{multi} multi-kill(s) at once → WHAT?!, money rain, dubstep wub")
+    chance = 1.0 if kills <= 8 else (0.6 if kills <= 20 else 0.4)
+    v["mlg_airhorn_chance"] = chance
+    if chance < 1:
+        why.append(f"Lots of kills → air horn on {int(chance * 100)} % of single kills (multi-kills always)")
+    v["mlg_voices"] = dens < 0.15
+    if dens < 0.15:
+        why.append("Kills are spread out → voice lines fill the gaps")
+    v["mlg_smoke"] = v["mlg_siren"] = lvl == "max"
+    if has_music:
+        v["mlg_music"] = "off"
+        why.append("You chose music → no Sandstorm")
+    else:
+        v["mlg_music"] = "sandstorm" if dur >= 20 else "sandstorm_flute"
+        why.append(f"{dur:.0f} s video → {'Sandstorm' if dur >= 20 else 'Sandstorm (flute)'} as music")
+    return v, why

@@ -330,3 +330,54 @@ def test_sandstorm_music(no_personal_sounds, tmp_path):
     a, b = _pcm(plain), _pcm(out)
     w = lambda x, t: float(np.sqrt(np.mean(x[int(t * 8000):int((t + 0.3) * 8000)] ** 2)))  # noqa: E731
     assert w(b, 1.5) > 3 * w(a, 1.5)                 # still playing after the 1 s file ended
+
+
+def test_suggestions_follow_the_clips():
+    one = mlg.ClipFacts([(2.0, 1)], [(2.0, "RIFLE")], 8.0)
+    v, why = mlg.suggest([one])
+    assert v["mlg_intensity"] == "mild" and not v["mlg_triple"] and not v["mlg_fbi"] and v["mlg_strobe"] == "light"
+    assert not v["mlg_scope"] and v["mlg_music"] == "sandstorm_flute" and why
+    big = mlg.ClipFacts([(1, 1), (2, 1), (3, 1), (4, 2)], [(2, "HEADSHOT · RIFLE"), (4, "C4")], 12.0)
+    v, why = mlg.suggest([one, big, big], has_music=True)
+    assert v["mlg_triple"] and v["mlg_fbi"] and v["mlg_scope"] and v["mlg_explosions"] and v["mlg_what"]
+    assert v["mlg_auto"] and v["mlg_music"] == "off" and v["mlg_strobe"] == "normal"
+    assert any("FBI" in w for w in why) and any("headshot" in w for w in why)
+    assert mlg.suggest([])[0] == {"mlg": True}
+    assert [mlg.clip_level(k) for k in ([(1, 1)], [(1, 1), (5, 1)], [(1, 1), (2, 1), (3, 1)])] == \
+        ["mild", "normal", "max"]
+
+
+def test_sounds_start_early_by_their_attack(tmp_path):
+    slow = np.concatenate([np.linspace(0, 0.9, int(0.2 * mlg.SR)), 0.9 * np.ones(int(0.3 * mlg.SR))])
+    p = mlg._write_wav(str(tmp_path / "slow.wav"), slow * np.sign(np.sin(np.arange(len(slow)) / 5)))
+    on = mlg.sound_onset(p)
+    assert 0.08 < on < 0.15                              # half-level after ~0.11 s of ramp
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360, airhorn_sound=p)
+    o = ReelOptions(mlg=True, **{k: k == "mlg_airhorn" for k in mlg.TOGGLES})
+    pl = mlg.plan([(2.0, 1)], 5.0, 640, 360, o, a, random.Random(1))
+    assert [round(t, 2) for t, f, _ in pl.sfx if f == p] == [round(2.0 - on, 2)]
+
+
+def test_reel_audio_stays_in_sync_over_many_clips(tmp_path):
+    """Joined clips must not drift: a click at the flash stays on the flash in clip 1 and clip 12."""
+    src = str(tmp_path / "s.mp4")
+    subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=160x90:r=30:d=4,drawbox=x=0:y=0:w=160:h=90:c=white:t=fill:"
+                    "enable='between(t,2,2.034)'", "-f", "lavfi", "-i",
+                    "aevalsrc='if(between(t\\,2\\,2.01)\\,0.9*sin(2*PI*1000*t)\\,0)':s=48000:d=4",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", src],
+                   check=True)
+    out = str(tmp_path / "r.mp4")
+    build_reel([Segment(src, 0.5, 3.5) for _ in range(12)], out, options=ReelOptions(fade=0, transition="cut"))
+    raw = subprocess.run([find_ffmpeg(), "-v", "error", "-i", out, "-vf", "scale=4:4,format=gray", "-f", "rawvideo",
+                          "-"], capture_output=True, check=True).stdout
+    v = np.frombuffer(raw, np.uint8).reshape(-1, 16).mean(1)
+    flashes = [i / 30 for i in range(1, len(v)) if v[i] > 128 >= v[i - 1]]
+    x = np.abs(_pcm(out))
+    clicks, last = [], -1.0
+    for i in np.flatnonzero(x > 0.3):
+        if i / 8000 - last > 0.5:
+            clicks.append(i / 8000)
+        last = i / 8000
+    assert len(flashes) == len(clicks) == 12
+    assert max(abs(c - f) for f, c in zip(flashes, clicks)) < 0.04

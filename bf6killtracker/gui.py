@@ -654,7 +654,21 @@ class MlgDialog(QDialog):
         lay = QVBoxLayout(self)
         self.cb_on = QCheckBox("MLG mode on")
         self.cb_on.setStyleSheet("font-weight: bold")
-        lay.addWidget(self.cb_on)
+        top = QHBoxLayout()
+        top.addWidget(self.cb_on)
+        top.addStretch(1)
+        self.b_suggest = QPushButton("✨ Suggest for my clips")
+        self.b_suggest.setToolTip("Look at the ticked clips (kills, headshots, triples, length) and pick settings")
+        self.b_suggest.clicked.connect(self.suggest)
+        self.cb_auto = QCheckBox("Scale chaos to each clip")
+        self.cb_auto.setToolTip("Small clips get mild chaos, triples and 4+ kill bursts get the max")
+        top.addWidget(self.cb_auto)
+        top.addWidget(self.b_suggest)
+        lay.addLayout(top)
+        self.lbl_why = QLabel("")
+        self.lbl_why.setWordWrap(True)
+        self.lbl_why.setVisible(False)
+        lay.addWidget(self.lbl_why)
         warn = QLabel("⚠ Strobe and flashes can trigger seizures in people with photosensitive epilepsy.")
         warn.setWordWrap(True)
         lay.addWidget(warn)
@@ -796,6 +810,7 @@ class MlgDialog(QDialog):
 
     def _load(self, v: dict) -> None:
         self.cb_on.setChecked(bool(v["mlg"]))
+        self.cb_auto.setChecked(bool(v["mlg_auto"]))
         self.cb_int.setCurrentIndex(max(0, self.cb_int.findData(v["mlg_intensity"])))
         self.cb_strobe.setCurrentIndex(max(0, self.cb_strobe.findData(v["mlg_strobe"])))
         self.cb_fry.setCurrentIndex(max(0, self.cb_fry.findData(v["mlg_deepfry"])))
@@ -814,7 +829,7 @@ class MlgDialog(QDialog):
 
     def values(self) -> dict:
         v = dict(self.v)
-        v.update(mlg=self.cb_on.isChecked(), mlg_intensity=self.cb_int.currentData(),
+        v.update(mlg=self.cb_on.isChecked(), mlg_auto=self.cb_auto.isChecked(), mlg_intensity=self.cb_int.currentData(),
                  mlg_strobe=self.cb_strobe.currentData(), mlg_deepfry=self.cb_fry.currentData(),
                  mlg_seed=self.sp_seed.value(), mlg_airhorn_chance=self.sl_horn.value() / 100,
                  mlg_sfx_volume=self.sl_vol.value() / 100, mlg_words=self.ed_words.text(),
@@ -832,6 +847,42 @@ class MlgDialog(QDialog):
                                            "Audio (*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus);;All files (*)")
         if f:
             edit.setText(f)
+
+    def _main_window(self):
+        mw = self.parent()
+        while mw is not None and not hasattr(mw, "_segments"):
+            mw = mw.parent()
+        return mw
+
+    def suggest(self) -> List[str]:
+        """Set the dialog from :func:`mlg.suggest` for the ticked clips (or the selected one)."""
+        from .mlg import ClipFacts
+        from .mlg import suggest as _suggest
+        mw = self._main_window()
+        segs = []
+        if mw is not None:
+            try:
+                segs = mw._segments()
+                if not segs:
+                    _, c = mw._current_clip()
+                    v, _ = mw._current_clip()
+                    segs = mw._segments((v, c)) if c is not None else []
+            except Exception:
+                segs = []
+        if not segs:
+            self.lbl_why.setText("Scan a video and tick some clips first; the suggestion is based on them.")
+            self.lbl_why.setVisible(True)
+            return []
+        has_music = bool(mw.ed_music.text()) if hasattr(mw, "ed_music") else False
+        vals, why = _suggest([ClipFacts(list(s.kills), list(s.captions), s.duration) for s in segs], has_music)
+        cur = self.values()
+        cur.update(vals)
+        self.v = cur
+        self._load(cur)
+        self.lbl_why.setText("<b>Suggested for your clips:</b><br>• " + "<br>• ".join(why))
+        self.lbl_why.setVisible(True)
+        self.adjustSize()
+        return why
 
     def sound_path(self, kind: str) -> Optional[str]:
         """Make (or find) the sound file for a listen button."""

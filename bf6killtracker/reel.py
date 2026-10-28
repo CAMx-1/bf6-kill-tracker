@@ -142,6 +142,8 @@ class ReelOptions:
     mlg_headshot_sound: bool = True
     mlg_mtndew_sound: bool = True
     mlg_intro: bool = True
+    mlg_auto: bool = False                      # scale the chaos to each clip (big moments get more)
+    mlg_suggest: bool = False                   # pick MLG settings from the clips themselves (mlg.suggest)
     mlg_music: str = "off"                      # off | sandstorm | sandstorm_flute (from your sounds folder)
     mlg_siren: bool = False
     mlg_bassboost: bool = True
@@ -234,6 +236,7 @@ TEMPLATES: Dict[str, dict] = {
                             mlg_ohscreen=False, mlg_hitflood=False, mlg_explosions=False, mlg_scope=False,
                             mlg_spin=False, mlg_shake=False, mlg_voices=True, mlg_siren=True),
     "MLG TikTok": dict(_MLG, vertical=True, size=(1080, 1920)),
+    "MLG auto (fits your clips)": dict(_MLG, mlg_suggest=True, mlg_auto=True),
 }
 
 
@@ -642,7 +645,9 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         cmd += ["-loop", "1", "-framerate", f"{F:g}", "-t", f"{max(0.05, s_.b - s_.a):.3f}", "-i", s_.png]
         st_inputs.append(idx)
         idx += 1
-    sfx = [(t, f, g) for t, f, g in (mlg.sfx if mlg else []) if 0 <= t < p.out_dur]
+    sfx_all = list(mlg.sfx) if mlg else []
+    sfx_idx = [i for i, (t, _, _) in enumerate(sfx_all) if 0 <= t < p.out_dur]
+    sfx = [sfx_all[i] for i in sfx_idx]
     sfx_inputs = []
     for _, f, _ in sfx:
         cmd += ["-i", f]
@@ -705,7 +710,11 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
             ms = int(round(t * 1000))
             # trim leading silence so downloaded clips hit on the kill
             cap = mlg.caps.get(sfx[k][1])
-            trim = (f",atrim=end={cap:.2f},afade=t=out:st={max(0.0, cap - 0.35):.2f}:d=0.35" if cap else "")
+            choke = mlg.lens[sfx_idx[k]] if sfx_idx[k] < len(mlg.lens) else None
+            if choke is not None:
+                cap = min(cap, choke) if cap else choke
+            fd = min(0.35, cap / 3) if cap else 0.0
+            trim = (f",atrim=end={cap:.3f},afade=t=out:st={max(0.0, cap - fd):.3f}:d={fd:.3f}" if cap else "")
             graph.append(f"[{inp}:a]aresample=48000,aformat=channel_layouts=stereo,"
                          f"silenceremove=start_periods=1:start_threshold=-50dB{trim},volume={g:g},"
                          f"adelay={ms}|{ms}[sx{k}]")
@@ -716,8 +725,7 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
         graph.append(af + (mlg.af if mlg else "") + ",apad[aout]")
     cmd += ["-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]", "-t", f"{d:.3f}",
             *enc_args, "-r", f"{F:g}", "-color_range", "tv",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-            "-video_track_timescale", "90000", out]
+            *PART_AUDIO, "-video_track_timescale", "90000", out]
     return cmd
 
 
@@ -730,7 +738,7 @@ def _card(ffmpeg: str, text: str, sub: str, o: ReelOptions, W: int, H: int, F: f
     w, h = render_text(png, text, int(H * 0.11), color=st.color, sub=sub, font_path=st.font,
                        accent=st.accent_color if st.accent else None, outline_pct=0, shadow=True)
     d = max(1.0, o.card_s)
-    out = os.path.join(tmp, f"{name}.mp4")
+    out = os.path.join(tmp, f"{name}.mov")
     graph = (f"[0:v]format=yuv420p[bg];[2:v]format=rgba,fade=t=in:st=0.15:d=0.4:alpha=1[t];"
              f"[bg][t]overlay=(W-w)/2:(H-h)/2,format=yuv420p,fade=t=in:st=0:d=0.3,"
              f"fade=t=out:st={d - 0.4:.3f}:d=0.4[vout]")
@@ -739,8 +747,7 @@ def _card(ffmpeg: str, text: str, sub: str, o: ReelOptions, W: int, H: int, F: f
            "-f", "lavfi", "-t", f"{d:.3f}", "-i", "anullsrc=r=48000:cl=stereo",
            "-loop", "1", "-t", f"{d:.3f}", "-i", png,
            "-filter_complex", graph, "-map", "[vout]", "-map", "1:a", "-t", f"{d:.3f}",
-           *enc_args, "-r", f"{F:g}", "-color_range", "tv", "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
-           "-ac", "2", "-video_track_timescale", "90000", out]
+           *enc_args, "-r", f"{F:g}", "-color_range", "tv", *PART_AUDIO, "-video_track_timescale", "90000", out]
     _simple(ffmpeg, cmd[1:], f"making the {name} card")
     return out
 
@@ -833,6 +840,12 @@ def build_reel(
     if o.mlg:
         from .soundpack import ensure
         ensure()                                 # fetch the meme sound pack once, if it's missing
+    if o.mlg and o.mlg_suggest:
+        from .mlg import ClipFacts, suggest
+        vals, _ = suggest([ClipFacts(list(sg.kills), list(sg.captions), sg.duration) for sg in segments],
+                          has_music=bool(o.music))
+        for k, val in vals.items():
+            setattr(o, k, val)
     if o.mlg and not o.music and o.mlg_music not in ("", "off"):
         from .mlg import my_sound
         song = my_sound(o.mlg_music)
@@ -931,7 +944,7 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
         from .mlg import Assets
         assets = Assets(os.path.join(tmp, "mlg"), W, H, o.mlg_airhorn_sound, o.mlg_triple_sound)
     for n, p in enumerate(parts):
-        out = os.path.join(tmp, f"part{n:04d}.mp4")
+        out = os.path.join(tmp, f"part{n:04d}.mov")
         ovs = _overlay_specs(p, o, W, H, tmp, n)
         fx = _mlg_plan(p, o, W, H, assets, first=n == 0) if assets else None
         cmd = _part_cmd(ffmpeg, p, infos[p.seg.video], o, W, H, F, enc_args, out, ovs, watermark, fades, fx)
@@ -952,11 +965,20 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
 
 def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = False):
     import random
-    from .mlg import plan
+    from .mlg import clip_level, plan
+    if o.mlg_auto:
+        lvl = clip_level(p.seg.kills)
+        order = ("off", "light", "normal", "max")
+        strobe = o.mlg_strobe if lvl != "mild" else order[min(order.index(o.mlg_strobe), 1)]
+        o = replace(o, mlg_intensity=lvl, mlg_strobe=strobe)
     kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
     caps = [((t - p.start) / p.speed, c) for t, c in p.seg.captions]
     rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
     return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first)
+
+
+# audio of the intermediate clips: uncompressed, so joined clips add up to exactly their lengths
+PART_AUDIO = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
 
 
 def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:
@@ -964,7 +986,9 @@ def _concat(ffmpeg: str, files: List[str], out: str, tmp: str) -> None:
     with open(listing, "w", encoding="utf-8") as f:
         for p in files:
             f.write("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n")
-    _simple(ffmpeg, ["-f", "concat", "-safe", "0", "-i", listing, "-c", "copy", out], "joining clips")
+    # video is copied; the PCM audio is encoded once here, so it stays in step with the picture
+    _simple(ffmpeg, ["-f", "concat", "-safe", "0", "-i", listing, "-map", "0:v", "-map", "0:a", "-c:v", "copy",
+                     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", out], "joining clips")
 
 
 def _xfade_join(ffmpeg: str, files: List[str], durs: List[float], out: str, kind: str, d: float,

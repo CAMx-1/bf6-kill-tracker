@@ -78,6 +78,13 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - **Explosive kills and multi-kills:** a fireball with a boom and screen shake.
 - **Multi-kills:** money rain and a dubstep wub.
 - **3 kills within 4 s (or a x3 multi-kill):** "OH BABY A TRIPLE" (voice and text), a screen of scrolling "OHHHHHH", a 360 spin, a hitmarker flood, the illuminati, pixel shades dropping in, deep-fried colours and bass-boosted audio.
+- **✨ Suggest for my clips** (in MLG settings) reads the ticked clips and picks settings to match, with a list of reasons:
+  - **Chaos** comes from the kill rate; triples and 4+ kill bursts get the max.
+  - **Event effects** are switched on only where they apply: triple effects, FBI, the headshot scope and voice, explosions, WHAT?! and money rain.
+  - **Air horns** happen less often when there are lots of kills.
+  - **Music:** Sandstorm, or the flute version for short videos, unless you picked your own song.
+  - **Scale chaos to each clip** gives quiet clips mild effects and the big moments everything. The **MLG auto (fits your clips)** template does all of this when you build.
+- **Timing:** every sound is placed so its punch lands on the kill. The app measures each clip's attack, so a voice line that starts with a breath is started a little earlier. A repeated sound cuts the previous one off. Clips are joined with uncompressed audio, which removed a drift of about 30 ms per clip. Over a 12-clip reel the sound stays within 1 ms of the kill.
 - **MLG settings…** has 20 on/off switches, including optional voice lines ("wow", "get rekt"…), rainbow smoke and a siren. It also has:
   - **Chaos:** mild, normal or max.
   - **Strobe:** off, colour only, colour plus a flash on kills, or maximum. Maximum flashes rapidly; don't use it if you or your viewers are sensitive to flashing images.

@@ -255,3 +255,26 @@ def test_mlg_options_round_trip(app, video, tmp_path, monkeypatch):
     assert o.mlg_triple_sound == "/x/triple.mp3"      # your own sound survives a template change
     w.preview.shutdown()
     w.close()
+
+
+def test_mlg_suggest_button(app, video, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from bf6killtracker import mlg
+    from bf6killtracker.gui import EffectsDialog, MlgDialog
+    monkeypatch.setattr(mlg, "my_sounds_dir", lambda: str(tmp_path / "mysounds"))
+    w = MainWindow(QSettings(str(tmp_path / "sg.ini"), QSettings.IniFormat))
+    m0 = MlgDialog(EffectsDialog(w, w.effects, {}), w.effects)
+    assert m0.suggest() == [] and "tick" in m0.lbl_why.text()        # nothing scanned yet
+    w.add_paths([video])
+    kills = [KillEvent(5, types=["headshot"]), KillEvent(6), KillEvent(7), KillEvent(8, count=2)]
+    w.videos[0].result = AnalysisResult(video, 20.0, 30.0, kills, [], 0, 0.0, 10.0, feed_used=True)
+    w.videos[0].status = "Done"
+    w.sp_gap.setValue(3.0)
+    w.refresh_tree() if hasattr(w, "refresh_tree") else None
+    m = MlgDialog(EffectsDialog(w, w.effects, {}), w.effects)
+    why = m.suggest()
+    v = m.values()
+    assert why and v["mlg"] and v["mlg_triple"] and v["mlg_fbi"] and v["mlg_intensity"] == "max"
+    assert m.lbl_why.isVisible() or m.lbl_why.text()
+    w.preview.shutdown()
+    w.close()
