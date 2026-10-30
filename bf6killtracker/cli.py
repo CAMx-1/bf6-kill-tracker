@@ -435,6 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_look_args(pv)
     pv.set_defaults(func=cmd_preview)
 
+    be = sub.add_parser("benchmark", help="find the fastest decoder (CPU / GPU) for scanning on this PC")
+    be.add_argument("video", help="one of your recordings")
+    be.add_argument("--seconds", type=float, default=15.0)
+    be.add_argument("--no-save", action="store_true", help="just report; don't change the decoder used")
+    be.set_defaults(func=cmd_benchmark)
+
     so = sub.add_parser("sounds", help="download the MLG meme sound pack into your sounds folder")
     so.add_argument("--force", action="store_true", help="download again even if present")
     so.set_defaults(func=cmd_sounds)
@@ -522,6 +528,21 @@ def cmd_preview(a: argparse.Namespace) -> int:
         o = preview_options(o)
     build_reel([seg], a.output, options=o)
     print(f"wrote {a.output}")
+    return 0
+
+
+def cmd_benchmark(a: argparse.Namespace) -> int:
+    from .video import benchmark_decode, save_decoder
+    res = benchmark_decode(a.video, a.seconds,
+                           progress=lambda i, n, m: print(f"  testing {m}…", file=sys.stderr) if m != "done" else None)
+    for name, fps in res:
+        print(f"{name:14} {f'{fps:6.0f} frames/s' if fps else 'failed'}")
+    ok = [n for n, f in res if f]
+    if not ok:
+        return 1
+    if not a.no_save:
+        save_decoder(ok[0], res)
+        print(f"scanning will use: {ok[0]}  (set BF6KT_HWACCEL to override)")
     return 0
 
 

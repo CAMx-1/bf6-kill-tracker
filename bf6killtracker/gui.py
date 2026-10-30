@@ -1209,6 +1209,23 @@ class LookPreviewDialog(QDialog):
         super().done(r)
 
 
+class BenchWorker(Worker):
+    progress = Signal(int, int, str)
+    done = Signal(list)
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    def run(self) -> None:
+        from .video import benchmark_decode
+        try:
+            r = benchmark_decode(self.path, progress=lambda i, n, m: self.progress.emit(i, n, m))
+        except Exception:
+            r = []
+        self.done.emit(r)
+
+
 class ShortsWorker(Worker):
     progress = Signal(float, str)
     done = Signal(list)
@@ -2010,8 +2027,12 @@ class MainWindow(QMainWindow):
         tb.addAction(self.act_analyze)
         tb.addAction(self.act_stop)
         tb.addSeparator()
+        self.act_speed = QAction(st.standardIcon(QStyle.SP_ComputerIcon), "Speed test", self)
+        self.act_speed.setToolTip("Find the fastest way to decode your recordings on this PC (CPU or GPU) "
+                                  "and use it for scanning")
+        self.act_speed.triggered.connect(self.speed_test)
         for a in (self.act_open, self.act_save, self.act_markers, self.act_review, self.act_watch, self.act_players,
-                  self.act_library):
+                  self.act_library, self.act_speed):
             tb.addAction(a)
 
         # left: video list + settings
@@ -2715,6 +2736,45 @@ class MainWindow(QMainWindow):
             out = getattr(self, "_last_reel_target", None)
             if out and extra:
                 self._pending_versions = [(n, dlg.spec(float(n)), dlg.cb_finale.isChecked()) for n in extra]
+
+    def speed_test(self) -> None:
+        """Decode a bit of a recording with the CPU and each GPU decoder; keep the fastest."""
+        from .video import benchmark_decode, save_decoder
+        v = next((x for x in self.videos if os.path.isfile(x.path)), None)
+        if v is None:
+            QMessageBox.information(self, APP_NAME, "Add a recording first; the test decodes 15 s of it.")
+            return
+        w = BenchWorker(v.path)
+
+        def done(res):
+            self._bench = None
+            self.bar.setRange(0, 100)
+            self.bar.setVisible(False)
+            ok = [(n, f) for n, f in res if f]
+            if not ok:
+                self.status.setText("Speed test failed.")
+                return
+            best = ok[0][0]
+            save_decoder(best, res)
+            names = {"none": "CPU", "cuda": "NVIDIA (CUDA)", "qsv": "Intel Quick Sync", "d3d11va": "GPU (D3D11)",
+                     "dxva2": "GPU (DXVA2)", "auto": "GPU (auto)", "videotoolbox": "Apple VideoToolbox",
+                     "vaapi": "GPU (VA-API)"}
+            lines = [f"{names.get(n, n)}: {f:.0f} frames/s" if f else f"{names.get(n, n)}: didn't work"
+                     for n, f in res]
+            self.last_bench = res
+            self.status.setText(f"Scanning will use {names.get(best, best)}.")
+            if not os.environ.get("BF6KT_NO_OPEN"):
+                QMessageBox.information(self, "Speed test", "\n".join(lines) +
+                                        f"\n\nScanning will use: {names.get(best, best)}")
+
+        def wire(worker):
+            worker.progress.connect(lambda i, n, name: self.status.setText(f"Speed test: {name} ({i + 1}/{n})…"))
+            worker.done.connect(done)
+
+        self._bench = w
+        self.bar.setVisible(True)
+        self.bar.setRange(0, 0)
+        self._run_in_thread(w, wire)
 
     def export_shorts_dialog(self) -> None:
         if not any(v.result for v in self.videos):

@@ -59,15 +59,93 @@ def is_low_priority() -> bool:
         return False
 
 
-def hwaccel_args() -> List[str]:
-    """Hardware video decoding flags (``BF6KT_HWACCEL``: ``auto``, ``none``, or an ffmpeg hwaccel name).
+HW_CANDIDATES = {"win32": ["cuda", "qsv", "d3d11va", "dxva2", "auto"], "darwin": ["videotoolbox"],
+                 "linux": ["cuda", "vaapi", "qsv", "auto"]}
 
-    Default: ``auto`` on Windows (NVIDIA/AMD/Intel GPUs decode 1440p HEVC far faster
-    than the CPU); off elsewhere. Frames are copied back to memory automatically, and
-    ffmpeg falls back to software decoding when no GPU decoder is available.
+
+def _plat() -> str:
+    return "win32" if sys.platform == "win32" else ("darwin" if sys.platform == "darwin" else "linux")
+
+
+def _decode_choice_file() -> str:
+    from .cache import cache_dir
+    return os.path.join(os.path.dirname(cache_dir()), "decoder.json")
+
+
+def saved_decoder() -> Optional[str]:
+    """The decoder the speed test picked on this PC ("none" = CPU), or None if never tested."""
+    import json
+    try:
+        with open(_decode_choice_file(), encoding="utf-8") as f:
+            return str(json.load(f).get("hwaccel") or "none")
+    except (OSError, ValueError):
+        return None
+
+
+def save_decoder(name: str, results: Optional[list] = None) -> None:
+    import json
+    path = _decode_choice_file()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"hwaccel": name, "results": results or []}, f, indent=1)
+
+
+def hwaccel_args() -> List[str]:
+    """Hardware video decoding flags.
+
+    ``BF6KT_HWACCEL`` (``auto``, ``none`` or an ffmpeg hwaccel name) wins; otherwise the decoder the
+    speed test (``bf6killtracker benchmark``) found fastest here; otherwise ``auto`` on Windows and the
+    CPU elsewhere. Frames are copied back to memory, and scanning retries on the CPU if a GPU decoder fails.
     """
-    mode = os.environ.get("BF6KT_HWACCEL", "auto" if sys.platform == "win32" else "none").strip().lower()
-    return [] if mode in ("", "none", "off", "0") else ["-hwaccel", mode]
+    mode = os.environ.get("BF6KT_HWACCEL")
+    if mode is None:
+        mode = saved_decoder() or ("auto" if sys.platform == "win32" else "none")
+    mode = mode.strip().lower()
+    return [] if mode in ("", "none", "off", "0", "cpu") else ["-hwaccel", mode]
+
+
+def available_hwaccels(ffmpeg: Optional[str] = None) -> List[str]:
+    try:
+        r = subprocess.run([ffmpeg or find_ffmpeg(), "-hide_banner", "-hwaccels"], capture_output=True, text=True,
+                           timeout=15, **NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    have = [ln.strip() for ln in r.stdout.splitlines()[1:] if ln.strip()]
+    return [h for h in HW_CANDIDATES[_plat()] if h in have or h == "auto"]
+
+
+def benchmark_decode(path: str, seconds: float = 15.0, ffmpeg: Optional[str] = None,
+                     progress=None) -> List[Tuple[str, Optional[float]]]:
+    """Decode ``seconds`` of ``path`` the way a scan does (every frame, crop to small regions) with the CPU
+    and each GPU decoder. Returns [(name, frames per second or None if it failed)], fastest first."""
+    import time
+    ffmpeg = ffmpeg or find_ffmpeg()
+    info = probe(path, ffmpeg)
+    w, h = info.width or 1920, info.height or 1080
+    # two HUD-sized crops, like the kill-skull and kill-feed regions
+    vf = (f"split=2[a][b];[a]crop={w // 5 // 2 * 2}:{h // 6 // 2 * 2}:{w * 2 // 5 // 2 * 2}:{h // 2 // 2 * 2},"
+          f"format=bgr24[x];[b]crop={w // 4 // 2 * 2}:{h // 4 // 2 * 2}:{w * 3 // 4 // 2 * 2}:0,format=bgr24,"
+          f"scale={w // 5 // 2 * 2}:{h // 6 // 2 * 2}[y];[x][y]vstack")
+    names = ["none"] + available_hwaccels(ffmpeg)
+    out: List[Tuple[str, Optional[float]]] = []
+    for i, name in enumerate(names):
+        if progress:
+            progress(i, len(names), name)
+        hw = [] if name == "none" else ["-hwaccel", name]
+        cmd = [ffmpeg, "-v", "error", "-nostdin", *hw, "-t", f"{seconds:.1f}", "-i", path, "-an", "-sn",
+               "-filter_complex", vf, "-f", "null", "-"]
+        t0 = time.monotonic()
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=max(60, seconds * 20), **NO_WINDOW)
+            ok = r.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        dt = time.monotonic() - t0
+        frames = min(seconds, info.duration or seconds) * (info.fps or 30)
+        out.append((name, frames / dt if ok and dt > 0 else None))
+    if progress:
+        progress(len(names), len(names), "done")
+    return sorted(out, key=lambda r: -(r[1] or 0))
 
 
 def find_ffmpeg() -> str:
