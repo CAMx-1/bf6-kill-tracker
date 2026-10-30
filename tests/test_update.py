@@ -23,7 +23,7 @@ class _Resp(io.BytesIO):
 def test_release_finds_installer(monkeypatch):
     body = {"tag_name": "v9.0.0", "html_url": "https://github.com/x", "body": "notes", "assets": [
         {"name": "BF6KillTracker-windows.zip", "browser_download_url": "https://github.com/a.zip"},
-        {"name": "BF6KillTracker-setup.exe", "browser_download_url": "https://github.com/s.exe"}]}
+        {"name": "BF6KillTracker-setup.exe", "browser_download_url": "https://github.com/BF6KillTracker-setup.exe"}]}
     monkeypatch.setattr(update.urllib.request, "urlopen",
                         lambda req, timeout=0: _Resp(json.dumps(body).encode()))
     monkeypatch.setattr(update, "_token", lambda: None)
