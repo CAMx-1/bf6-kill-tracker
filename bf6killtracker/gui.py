@@ -3372,11 +3372,42 @@ class MainWindow(QMainWindow):
         msg.setWindowTitle(APP_NAME)
         msg.setText(f"Version {rel.version} is available (you have {__version__}).")
         msg.setInformativeText((rel.notes or "")[:800])
-        open_btn = msg.addButton("Open download page", QMessageBox.AcceptRole)
+        from .update import can_self_update
+        upd_btn = None
+        if can_self_update() and rel.setup_url:
+            upd_btn = msg.addButton("Update now", QMessageBox.AcceptRole)
+        open_btn = msg.addButton("Open download page", QMessageBox.ActionRole)
         msg.addButton("Later", QMessageBox.RejectRole)
         msg.exec()
-        if msg.clickedButton() is open_btn:
+        if upd_btn is not None and msg.clickedButton() is upd_btn:
+            self.self_update(rel)
+        elif msg.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl(rel.url))
+
+    def self_update(self, rel) -> None:
+        """Download the installer, run it silently and quit; it starts the new version when done."""
+        from .update import download_installer, run_installer
+        busy = bool(self._analyze_worker or self._reel_worker)
+        if busy and QMessageBox.question(self, APP_NAME, "A scan or video is still running. Stop it and "
+                                         "update?") != QMessageBox.Yes:
+            return
+        self.status.setText(f"Downloading v{rel.version}…")
+        self.bar.setVisible(True)
+        self.bar.setValue(0)
+        QApplication.processEvents()
+        try:
+            setup = download_installer(rel, progress=lambda f: (self.bar.setValue(int(f * 100)),
+                                                                QApplication.processEvents()))
+        except Exception as exc:
+            self.bar.setVisible(False)
+            QMessageBox.warning(self, APP_NAME, f"The update couldn't be downloaded:\n{exc}")
+            return
+        self.save_settings() if hasattr(self, "save_settings") else None
+        run_installer(setup)
+        self.status.setText("Installing the update; the app will restart…")
+        QApplication.processEvents()
+        self.stop_work()
+        QApplication.quit()
 
     def review_selected(self) -> None:
         rows = sorted({i.row() for i in self.table.selectedIndexes()})

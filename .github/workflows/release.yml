@@ -45,12 +45,40 @@ jobs:
           "GUI opened and closed OK"
       - run: Compress-Archive -Path dist/BF6KillTracker -DestinationPath BF6KillTracker-windows.zip
         shell: pwsh
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $ver = python -c "import bf6killtracker; print(bf6killtracker.__version__)"
+          & $iscc "/DAppVersion=$ver" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-Item dist\BF6KillTracker-setup.exe | Format-List Name, Length
+      - name: Smoke test the installer (silent install, run, uninstall)
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $p = Start-Process dist\BF6KillTracker-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$env:RUNNER_TEMP\bf6kt-inst" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "install failed: $($p.ExitCode)" }
+          Start-Sleep 3
+          Get-Process BF6KillTracker -ErrorAction SilentlyContinue | Stop-Process -Force
+          $exe = "$env:RUNNER_TEMP\bf6kt-inst\BF6KillTracker.exe"
+          $p = Start-Process $exe -ArgumentList "--version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput iv.txt
+          Get-Content iv.txt
+          if ($p.ExitCode -ne 0) { throw "installed exe failed" }
+          $p = Start-Process "$env:RUNNER_TEMP\bf6kt-inst\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "uninstall failed" }
+          "installer OK"
       - uses: actions/upload-artifact@v4
         with:
           name: BF6KillTracker-windows
-          path: BF6KillTracker-windows.zip
+          path: |
+            BF6KillTracker-windows.zip
+            dist/BF6KillTracker-setup.exe
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: BF6KillTracker-windows.zip
+          files: |
+            BF6KillTracker-windows.zip
+            dist/BF6KillTracker-setup.exe
           generate_release_notes: true
