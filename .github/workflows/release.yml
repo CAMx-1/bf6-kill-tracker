@@ -58,16 +58,24 @@ jobs:
         shell: pwsh
         timeout-minutes: 5
         run: |
-          $p = Start-Process dist\BF6KillTracker-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$env:RUNNER_TEMP\bf6kt-inst" -Wait -PassThru
+          # (not -Wait: it also waits for the app the installer starts at the end)
+          $env:BF6KT_NO_UPDATE_CHECK = "1"
+          $p = Start-Process dist\BF6KillTracker-setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$env:RUNNER_TEMP\bf6kt-inst" -PassThru
+          if (-not $p.WaitForExit(180000)) { throw "install timed out" }
           if ($p.ExitCode -ne 0) { throw "install failed: $($p.ExitCode)" }
-          Start-Sleep 3
+          Start-Sleep 5
+          if (-not (Get-Process BF6KillTracker -ErrorAction SilentlyContinue)) { "note: app not started after install" }
           Get-Process BF6KillTracker -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep 2
           $exe = "$env:RUNNER_TEMP\bf6kt-inst\BF6KillTracker.exe"
           $p = Start-Process $exe -ArgumentList "--version" -Wait -PassThru -NoNewWindow -RedirectStandardOutput iv.txt
           Get-Content iv.txt
           if ($p.ExitCode -ne 0) { throw "installed exe failed" }
-          $p = Start-Process "$env:RUNNER_TEMP\bf6kt-inst\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -Wait -PassThru
+          $p = Start-Process "$env:RUNNER_TEMP\bf6kt-inst\unins000.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES" -PassThru
+          if (-not $p.WaitForExit(120000)) { throw "uninstall timed out" }
           if ($p.ExitCode -ne 0) { throw "uninstall failed" }
+          Start-Sleep 3
+          if (Test-Path "$env:RUNNER_TEMP\bf6kt-inst\BF6KillTracker.exe") { throw "uninstall left the exe behind" }
           "installer OK"
       - uses: actions/upload-artifact@v4
         with:

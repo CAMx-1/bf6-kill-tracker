@@ -1340,6 +1340,132 @@ class ShortsDialog(QDialog):
             st.setValue(k, v)
 
 
+class GalleryWorker(Worker):
+    thumb = Signal(str, str, str)       # template, still, gif
+    done = Signal()
+
+    def __init__(self, names, seg):
+        super().__init__()
+        self.names, self.seg = names, seg
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        from .gallery import render_all
+        render_all(self.names, self.seg, progress=lambda i, n, name, p: self.thumb.emit(name, p[0], p[1]),
+                   should_cancel=lambda: self._cancel)
+        self.done.emit()
+
+
+class GalleryDialog(QDialog):
+    """Every template as a looping thumbnail; click one to use it."""
+    COLS = 4
+
+    def __init__(self, parent, mw: "MainWindow", names: Optional[List[str]] = None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QGridLayout, QScrollArea
+        from .reel import TEMPLATES
+        names = list(names or TEMPLATES)
+        self.mw = mw
+        self.setWindowTitle("Template gallery")
+        self.resize(1320, 820)
+        lay = QVBoxLayout(self)
+        self.lbl = QLabel("Rendering previews… (once; they're kept for next time)")
+        lay.addWidget(self.lbl)
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        self.cells: Dict[str, QLabel] = {}
+        self.movies: Dict[str, object] = {}
+        for i, name in enumerate(names):
+            box = QVBoxLayout()
+            pic = QLabel("…")
+            pic.setFixedSize(300, 170)
+            pic.setAlignment(Qt.AlignCenter)
+            pic.setStyleSheet("background:#111; color:#777; border-radius:4px;")
+            pic.setCursor(Qt.PointingHandCursor)
+            pic.mousePressEvent = lambda e, n=name: self.choose(n)     # click to pick
+            b = QPushButton(name.replace("&", "&&"))
+            b.setFlat(True)
+            b.clicked.connect(lambda _=False, n=name: self.choose(n))
+            box.addWidget(pic)
+            box.addWidget(b)
+            cell = QWidget()
+            cell.setLayout(box)
+            grid.addWidget(cell, i // self.COLS, i % self.COLS)
+            self.cells[name] = pic
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        lay.addWidget(scroll, 1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        close = QPushButton("Close")
+        close.clicked.connect(self.reject)
+        btns.addWidget(close)
+        lay.addLayout(btns)
+        self.chosen = ""
+        self._n = 0
+        seg = self._footage()
+        self.lbl.setText("Rendering previews on " + ("your clip" if seg else "a demo clip") +
+                         "… (once; they're kept for next time)")
+        self._worker = GalleryWorker(names, seg)
+
+        def wire(w):
+            w.thumb.connect(self._thumb)
+            w.done.connect(self._done)
+
+        mw._run_in_thread(self._worker, wire)
+
+    def _footage(self):
+        """Your best scanned moment (looks are easier to judge on real footage), or None for the demo."""
+        try:
+            cands = self.mw._candidates()
+        except Exception:
+            return None
+        if not cands:
+            return None
+        from .reel import caption_for
+        v, c, s = max(cands, key=lambda x: x[2].score)
+        if not os.path.isfile(v.path):
+            return None
+        caps = [(k.time, caption_for(k.type_list(), k.weapons)) for k in c.events]
+        return Segment(v.path, max(0.0, c.start - 3), c.end + 2, c.title, [(k.time, k.count) for k in c.events],
+                       c.title, caps)
+
+    def _thumb(self, name: str, jpg: str, gif: str) -> None:
+        from PySide6.QtGui import QMovie
+        pic = self.cells.get(name)
+        if pic is None:
+            return
+        self._n += 1
+        self.lbl.setText(f"{self._n} of {len(self.cells)} previews ready — click a look to use it")
+        mv = QMovie(gif)
+        if mv.isValid():
+            first = QPixmap(jpg)
+            sz = first.size().scaled(pic.size(), Qt.KeepAspectRatio)
+            mv.setScaledSize(sz)
+            pic.setMovie(mv)
+            mv.start()
+            self.movies[name] = mv
+        else:
+            pic.setPixmap(QPixmap(jpg).scaled(pic.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+    def _done(self) -> None:
+        self.lbl.setText("Click a look to use it")
+
+    def choose(self, name: str) -> None:
+        self.chosen = name
+        self.accept()
+
+    def done(self, r: int) -> None:  # noqa: D401 - stop rendering when closed
+        self._worker.cancel()
+        for mv in self.movies.values():
+            mv.stop()  # type: ignore[attr-defined]
+        super().done(r)
+
+
 class EffectsDialog(QDialog):
     """Transitions, kill-cam effects, captions, intro/outro cards, watermark, audio and templates."""
     TRANSITIONS = [("Fade through black", "fade"), ("Hard cut", "cut"), ("Crossfade", "crossfade"),
@@ -1369,7 +1495,11 @@ class EffectsDialog(QDialog):
         b_apply.clicked.connect(self._apply_template)
         b_save = QPushButton("Save current as template…")
         b_save.clicked.connect(self._save_template)
+        b_gal = QPushButton("Gallery…")
+        b_gal.setToolTip("See every template as a moving preview and pick one")
+        b_gal.clicked.connect(self._gallery)
         trow.addWidget(self.cb_tpl, 1)
+        trow.addWidget(b_gal)
         trow.addWidget(b_apply)
         trow.addWidget(b_save)
         form.addRow("<b>Template</b>", trow)
@@ -1513,6 +1643,12 @@ class EffectsDialog(QDialog):
         for k, e in self.ed.items():
             v[k] = e.text()
         return v
+
+    def _gallery(self) -> None:
+        g = GalleryDialog(self, self.parent())
+        if g.exec() and g.chosen:
+            self.cb_tpl.setCurrentIndex(self.cb_tpl.findData(g.chosen))
+            self._apply_template()
 
     def _edit_mlg(self) -> None:
         cur = self.values()

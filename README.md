@@ -46,15 +46,21 @@ bike-c4.mp4
      - game-audio track choice, noise reduction, and loudness levelling;
      - an automatic YouTube thumbnail;
      - **look:** colour grade (Vivid, Warm, Cool, Teal & orange, Cinematic, Black & white, Sepia, Vintage, Neon, Night vision, Deep fried), cinema bars, vignette, film grain;
-     - **templates** (20): Clean, Montage, Cinematic, Esports, Sniper elite, Teal & orange, Retro VHS, Noir, Night ops, Neon, Chill, Deep fried, TikTok hype, Funny moments, and six MLG looks (MLG, MLG lite, MLG MAX, MLG 360 no scope, MLG sounds only, MLG TikTok). You can also save your own;
-     - **▶ Preview this look:** renders a few seconds with the current settings and plays them with sound in your video player. It uses the selected clip, or a made-up demo clip with a kill, a headshot, a triple and a C4 double kill;
+     - **templates** (21): Clean, Montage, Cinematic, Esports, Sniper elite, Teal & orange, Retro VHS, Noir, Night ops, Neon, Chill, Deep fried, TikTok hype, Funny moments, and seven MLG looks (MLG, MLG lite, MLG MAX, MLG 360 no scope, MLG sounds only, MLG TikTok, MLG auto). You can also save your own;
+     - **Gallery…:** every template as a looping preview, rendered on your best scanned moment (or a demo clip), so you can pick by eye. Previews are made once and kept;
+     - **▶ Preview this look:** renders a few seconds and plays them, with sound, in a preview window inside the app. While it plays you can switch the template, colour, transitions, kill-cam, chaos, strobe and any MLG element; it re-renders automatically, and **Use these settings** copies them back. It uses the selected clip, or a demo clip with a kill, a headshot, a triple and a C4 double kill;
      - **MLG mode** (below).
    - **Extras:** slow-motion replay of the best kill, clip titles, GPU encoding on Windows.
-8. **Export markers…** writes kills, deaths and streaks as markers for DaVinci Resolve / Premiere (EDL), Final Cut / Resolve (FCPXML) or Premiere (XML), or as YouTube chapter timestamps.
-9. **Save your work.** **Save project…** / **Open project…** keep your videos, ticks, trims, order and settings.
-10. **See your stats.**
+8. **Export Shorts…** makes one vertical 1080×1920 video per top moment, ready for TikTok, YouTube Shorts and Reels:
+   - choose how many, the shortest and longest length (default 15–30 s), the look, and the folder;
+   - each Short opens with a set-up before the kills, has a hook title at the top for the first 3 s ("3 KILLS IN 2 SECONDS", "TRIPLE C4!", "2 HEADSHOTS"), and has kill call-outs and captions;
+   - the moments never overlap, and the list shows what you'll get before you export.
+9. **Export markers…** writes kills, deaths and streaks as markers for DaVinci Resolve / Premiere (EDL), Final Cut / Resolve (FCPXML) or Premiere (XML), or as YouTube chapter timestamps.
+10. **Save your work.** **Save project…** / **Open project…** keep your videos, ticks, trims, order and settings.
+11. **See your stats.**
     - **Players** lists the opponents you killed most and who killed you, matched by name in the kill feed.
     - **Library & stats** shows every session: best streaks, K/D, kills per hour and headshot rate.
+12. **Speed test** (toolbar) decodes 15 s of one of your recordings with the CPU and each GPU decoder ffmpeg offers on your PC (NVIDIA CUDA, Intel Quick Sync, D3D11, DXVA2…). Scanning then uses the fastest. On this Mac the CPU won: 141 frames/s against 111 for VideoToolbox. A decoder that fails falls back to the CPU automatically. Command line: `python -m bf6killtracker benchmark VIDEO`.
 
 ### Montage builder
 
@@ -101,8 +107,12 @@ The 2014 "MLG montage" parody look. Turn it on with the **MLG** template, the ti
   - The cans and the flying logo use the real Mtn Dew logo, from Wikimedia Commons, where it's public domain as a text logo. Mtn Dew is a PepsiCo trademark, and this project isn't affiliated with PepsiCo.
   - The triple line uses your computer's built-in voice: Windows speech or macOS `say`; on Linux, `espeak` if installed. To use the original meme clip, or any other sound, choose it under **Triple sound** / **Air horn sound**. The original meme clips aren't included because they're copyrighted.
   - Sources are listed in `bf6killtracker/templates/mlg/SOURCES.txt`.
+- **Video memes:** animated memes pop in on triples (2, or 3 at max chaos) and on big multi-kills. Explosive kills get a real green-screen fireball.
+  - The pack has the rainbow frog, dat boi, nyan cat, two dancing Snoops, Sanic, the rekt dance kid and the deal-with-it cat (GIFs from GIPHY), plus a CC BY 3.0 green-screen explosion from Wikimedia Commons. It downloads with the sounds, about 13 MB.
+  - **Your own stickers:** put GIF, WebM, MP4, MOV or PNG files in the stickers folder (**MLG settings… → Open stickers folder**), next to the sounds folder. A green screen or a flat black or white background is cut out automatically, a PNG's transparency is kept, and anything else appears as a framed pop-up window. The same meme isn't repeated until the others have been used.
+- **On the beat:** with music (your song, or Sandstorm), the picture punches in on every beat, harder on the first beat of each bar. The strobe colours step on the beat, flashes snap to the nearest beat, and big moments flash on each beat. The song is also started at the point where its drop lands on the reel's biggest moment (the triple, or else the biggest multi-kill), using a later loop of the song if needed. Turn it off with the **On the beat** switch.
 - **Meme sound pack:** 16 classic clips (Oh baby a triple, MLG air horn and hitmarker, FBI OPEN UP, Sandstorm…).
-  - They download automatically from myinstants.com the first time you open **MLG settings…** or build an MLG video, about 1.5 MB. **Download meme sounds** retries any that failed; offline, the built-in sounds are used.
+  - They download automatically from myinstants.com the first time you open **MLG settings…** or build an MLG video, about 1.5 MB. **Download memes** retries any that failed; offline, the built-in sounds are used.
   - From the command line: `python -m bf6killtracker sounds`.
   - They aren't shipped in the app or the repository because most are copyrighted; Sandstorm, for example, is a commercial song.
   - Each file is checked against a SHA-256 checksum before it's saved.
@@ -135,9 +145,11 @@ The app checks GitHub for new releases at start-up.
 ## Install
 
 **Windows, no Python needed:**
-1. Download `BF6KillTracker-windows.zip` from the repository's Releases page. Every commit's build is also available from the Actions tab, under *windows-build*.
-2. Unzip it.
-3. Run `BF6KillTracker.exe`. The same exe also takes the command-line arguments shown below.
+1. Download `BF6KillTracker-setup.exe` from the repository's Releases page and run it. It installs for your user only (no admin prompt), adds Start menu shortcuts and an optional desktop shortcut, and can be uninstalled from Windows Settings → Apps.
+2. **Updates:** when a new release is out, the app shows *Update available*; **Update now** downloads the new installer, installs it silently and restarts the app. Your scans, settings, sounds and stickers are kept.
+3. Prefer no installer? `BF6KillTracker-windows.zip` from the same page works unzipped anywhere. Every commit's build, with both files, is also on the Actions tab, under *windows-build*.
+
+The exe also takes the command-line arguments shown below.
 
 **From source (any OS):** you need Python 3.9 or newer; 3.9, 3.12, 3.14 and 3.15 are tested. ffmpeg is bundled through `imageio-ffmpeg`.
 - Windows: double-click `bf6killtracker.bat`.
@@ -167,6 +179,7 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 | `--template Montage` | A ready-made look; one of the 20 templates above (e.g. Cinematic, Noir, "MLG MAX"). |
 | `--mlg` | MLG mode. Also `--mlg-intensity max`, `--mlg-strobe light`, `--mlg-deepfry always`, `--mlg-on voices,smoke` / `--mlg-off cans,spin` (any of the 20 elements), `--mlg-words "GG,EZ"`, `--mlg-sfx-volume 1.5`, `--mlg-airhorn-chance 0.5`, `--triple-sound FILE`, `--airhorn-sound FILE`. |
 | `--grade Cinematic --letterbox --vignette --grain` | Colour grade and film look. |
+| `--shorts FOLDER` | Also export one vertical Short per top moment. Also `--shorts-count 5`, `--shorts-min 15`, `--shorts-max 30`, `--shorts-template "MLG TikTok"`. |
 | `--transition whip --killcam both --captions` | Transitions, kill-cam zoom/shake, kill captions. |
 | `--intro-text CAMx --outro-text "Thanks for watching" --watermark-text @CAMx` | Cards and watermark (`--watermark-image logo.png`). |
 | `--audio-track 2 --denoise --loudnorm --thumbnail thumb.jpg` | Audio options and a YouTube thumbnail. |
@@ -188,6 +201,8 @@ python -m bf6killtracker analyze VIDEO_OR_FOLDER [more ...] [options]
 `calibrate clip.mp4 --at 52.5` writes a PNG showing where the detector looks.
 
 To try a look without a full render: `python -m bf6killtracker preview out.mp4 --template "MLG MAX"`. This renders a few seconds of the demo clip; add `--video FILE --start 50 --kills 52:3` to use your own recording.
+
+Other commands: `python -m bf6killtracker sounds` downloads the meme sound and video pack, and `python -m bf6killtracker benchmark VIDEO` runs the decoder speed test.
 
 ## How it works
 

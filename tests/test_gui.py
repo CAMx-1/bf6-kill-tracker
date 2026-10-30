@@ -336,3 +336,24 @@ def test_shorts_dialog_and_export(app, video, tmp_path, monkeypatch):
     assert (probe(w.last_shorts[0]).width, probe(w.last_shorts[0]).height) == (1080, 1920)
     w.preview.shutdown()
     w.close()
+
+
+def test_gallery_dialog(app, video, tmp_path, monkeypatch):
+    import time as _t
+    from PySide6.QtCore import QSettings
+    from bf6killtracker import gallery
+    from bf6killtracker.gui import EffectsDialog, GalleryDialog
+    monkeypatch.setattr(gallery, "gallery_dir", lambda: str(tmp_path / "gal"))
+    w = MainWindow(QSettings(str(tmp_path / "gd.ini"), QSettings.IniFormat))
+    d = EffectsDialog(w, w.effects, {})
+    names = ["Clean", "Noir"]
+    g = GalleryDialog(d, w, names)
+    t0 = _t.time()
+    while g._n < 2 and _t.time() - t0 < 90:
+        app.processEvents()
+        _t.sleep(0.05)
+    assert g._n == 2 and set(g.movies) == set(names)
+    g.choose("Noir")
+    assert g.chosen == "Noir"
+    w.preview.shutdown()
+    w.close()
