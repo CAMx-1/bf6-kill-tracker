@@ -17,6 +17,7 @@ def no_personal_sounds(tmp_path_factory, monkeypatch):
     """Keep the developer's own sounds folder out of the tests."""
     d = str(tmp_path_factory.mktemp("mysounds"))
     monkeypatch.setattr(mlg, "my_sounds_dir", lambda: d)
+    monkeypatch.setenv("BF6KT_STICKERS_DIR", os.path.join(d, "stickers"))
     return d
 
 
@@ -436,3 +437,124 @@ def test_suggest_uses_game_loudness():
     assert mlg.suggest([clip], game_db=-12)[0]["mlg_sfx_volume"] == 1.3
     assert mlg.suggest([clip], game_db=-35)[0]["mlg_sfx_volume"] == 0.8
     assert "mlg_sfx_volume" not in mlg.suggest([clip])[0]
+
+
+def _gif(path, bg, seconds=1.0, size="160x120"):
+    """A test 'meme': a moving red square on a flat background (or green screen)."""
+    subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={bg}:s={size}:r=10:d={seconds}",
+                    "-vf", "drawbox=x=40:y=30:w=50:h=50:c=red:t=fill", path], check=True)
+    return path
+
+
+def test_detect_key_and_cut_out(no_personal_sounds, tmp_path):
+    st = os.path.join(no_personal_sounds, "stickers")
+    os.makedirs(st)
+    green = _gif(os.path.join(st, "gs.webm"), "0x00FF00")
+    black = _gif(os.path.join(st, "dark.gif"), "black")
+    busy = os.path.join(st, "busy.mp4")
+    subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x120:r=10:d=1", busy],
+                   check=True)
+    assert mlg.detect_key(green).startswith("0x00F") and mlg.detect_key(black).startswith("0x0")
+    assert mlg.detect_key(busy) == ""
+    assert sorted(map(mlg._slot, mlg.my_stickers())) == ["busy", "dark", "gs"]
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360)
+    clip = a.meme(green, 0.4, 1.5)
+    assert clip and a.size_of(clip)[1] == 144
+    raw = subprocess.run([find_ffmpeg(), "-v", "error", "-ss", "0.5", "-i", clip, "-frames:v", "1", "-f", "rawvideo",
+                          "-pix_fmt", "rgba", "-"], capture_output=True, check=True).stdout
+    w, h = a.size_of(clip)
+    px = np.frombuffer(raw, np.uint8).reshape(h, w, 4)
+    assert px[2, 2, 3] < 30 and px[:, :, 3].max() == 255            # green gone, red square kept
+    framed = a.meme(busy, 0.4, 1.0)
+    fw, fh = a.size_of(framed)
+    assert fh > 144                                                 # white frame added round a pop-up
+
+
+def test_video_memes_on_triples(no_personal_sounds, tmp_path):
+    st = os.path.join(no_personal_sounds, "stickers")
+    os.makedirs(st)
+    for n in ("frog", "nyan", "snoop"):
+        _gif(os.path.join(st, n + ".gif"), "black")
+    a = mlg.Assets(str(tmp_path / "a"), 640, 360)
+    o = ReelOptions(mlg=True)
+    p = mlg.plan([(1.0, 1), (1.5, 1), (2.0, 1)], 6.0, 640, 360, o, a, random.Random(1))
+    vids = [s_ for s_ in p.stickers if s_.video]
+    assert len(vids) == 2 and len({s_.png for s_ in vids}) == 2          # normal: 2 different memes
+    off = mlg.plan([(1.0, 1), (1.5, 1), (2.0, 1)], 6.0, 640, 360, ReelOptions(mlg=True, mlg_videomemes=False), a,
+                   random.Random(1))
+    assert not [s_ for s_ in off.stickers if s_.video]
+    src = str(tmp_path / "src.mp4")
+    _video(src, 4)
+    out = str(tmp_path / "o.mp4")
+    build_reel([Segment(src, 0, 4, "x", [(1.0, 1), (1.5, 1), (2.0, 1)])], out,
+               options=ReelOptions(fade=0, mlg=True, mlg_strobe="off",
+                                   **{k: k in ("mlg_videomemes", "mlg_triple") for k in mlg.TOGGLES}))
+    assert abs(probe(out).duration - 4.0) < 0.2
+
+
+def test_video_pack_download(tmp_path, monkeypatch):
+    import hashlib
+    from bf6killtracker import soundpack
+    data = {c.url: c.slot.encode() * 30 for c in soundpack.VIDEO_PACK}
+    pack = [c._replace(sha256=hashlib.sha256(data[c.url]).hexdigest()) for c in soundpack.VIDEO_PACK]
+    monkeypatch.setattr(soundpack, "VIDEO_PACK", pack)
+    monkeypatch.setattr(soundpack, "_fetch", lambda url, timeout: data[url])
+    r = soundpack.download(str(tmp_path), video=True)
+    assert set(r.values()) == {"ok"}
+    assert (tmp_path / "frog.gif").exists() and (tmp_path / "explosion_gs.webm").exists()
+    assert not soundpack.missing(str(tmp_path), video=True)
+
+
+def _song(path, bpm=120.0, seconds=20.0, drop=10.0, sr=22050):
+    """Quiet clicks on the beat, then loud bass + clicks from ``drop`` on."""
+    t = np.arange(int(seconds * sr)) / sr
+    per = 60 / bpm
+    click = np.exp(-((t % per) / 0.01)) * np.sin(2 * np.pi * 2000 * t)
+    bass = np.sin(2 * np.pi * 55 * t) * (t >= drop)
+    y = 0.15 * click + 0.6 * bass + 0.4 * click * (t >= drop)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((np.clip(y, -1, 1) * 32767).astype("<i2").tobytes())
+    return path
+
+
+def test_drop_and_beat_grid(tmp_path):
+    from bf6killtracker.music import detect_beats, find_drop, load_mono
+    y = load_mono(_song(str(tmp_path / "s.wav")))
+    bpm, beats = detect_beats(y)
+    assert abs(bpm - 120) < 3
+    assert abs(find_drop(y) - 10.0) < 0.4
+    flat = load_mono(_song(str(tmp_path / "f.wav"), drop=99))
+    assert find_drop(flat) is None
+    ph, per = mlg.beat_grid([0.25, 0.75, 1.25, 1.76, 2.25])
+    assert abs(per - 0.5) < 0.02 and abs(ph - 0.25) < 0.03
+    assert mlg._snap(0.8, (0.25, 0.5), 0.12) == 0.75 and mlg._snap(1.0, (0.25, 0.5), 0.12) == 1.0
+    assert "zoompan" in mlg.beat_pump(640, 360, (0.25, 0.5), 30)
+
+
+def test_big_moment_lands_on_the_drop(tmp_path):
+    from bf6killtracker import reel
+    song = _song(str(tmp_path / "s.wav"), drop=10.0)
+    segs = [Segment("a.mp4", 0, 8, "a", [(3.0, 1)]), Segment("b.mp4", 0, 8, "b", [(2.0, 1), (3.0, 1), (4.0, 1)])]
+    parts = [reel._Part(s_, s_.start, s_.duration) for s_ in segs]
+    o = ReelOptions(mlg=True, music=song, transition="cut")
+    reel._mlg_beat_grid(parts, o)
+    big = 8.0 + 4.0                                       # the triple's 3rd kill, in the reel
+    assert abs(parts[1].drop - 4.0) < 0.5                 # the drop hits the triple
+    assert parts[0].beats and all(0 <= b < 8 for b in parts[1].beats)
+    # drop earlier than the big moment: a later loop of the song is used
+    parts2 = [reel._Part(s_, s_.start, s_.duration) for s_ in segs * 2]
+    reel._mlg_beat_grid(parts2, o)
+    assert any(p.drop is not None and abs(p.drop - 4.0) < 0.5 for p in parts2)
+
+
+def test_beat_render(tmp_path):
+    src = str(tmp_path / "src.mp4")
+    _video(src, 4)
+    out = str(tmp_path / "o.mp4")
+    build_reel([Segment(src, 0, 4, "x", [(1.0, 1), (1.5, 1), (2.0, 1)])], out,
+               options=ReelOptions(fade=0, mlg=True, music=_song(str(tmp_path / "s.wav"), seconds=8, drop=3.0),
+                                   mlg_videomemes=False))
+    assert abs(probe(out).duration - 4.0) < 0.2

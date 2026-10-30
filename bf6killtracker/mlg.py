@@ -87,6 +87,59 @@ def my_sounds_dir() -> str:
     return os.path.join(os.path.dirname(cache_dir()), "sounds")
 
 
+STICKER_EXTS = (".gif", ".webm", ".mp4", ".mov", ".mkv", ".webp", ".png")
+
+
+def my_stickers_dir() -> str:
+    """Folder for animated memes / your own stickers (next to the sounds folder)."""
+    env = os.environ.get("BF6KT_STICKERS_DIR")
+    if env:
+        return env
+    return os.path.join(os.path.dirname(my_sounds_dir()), "stickers")
+
+
+def my_stickers() -> List[str]:
+    """Every sticker file in the stickers folder (pack memes + your own), sorted."""
+    d = my_stickers_dir()
+    if not os.path.isdir(d):
+        return []
+    return sorted(os.path.join(d, f) for f in os.listdir(d)
+                  if f.lower().endswith(STICKER_EXTS) and not f.startswith("."))
+
+
+_keys: Dict[str, str] = {}
+
+
+def detect_key(path: str) -> str:
+    """How to cut a meme out: "0xRRGGBB:sim" colour to key (green screen, flat black/white background),
+    "alpha" if it already has transparency, or "" for a framed pop-up window."""
+    if path in _keys:
+        return _keys[path]
+    key = ""
+    try:
+        from .video import NO_WINDOW, find_ffmpeg
+        raw = subprocess.run([find_ffmpeg(), "-v", "error", "-i", path, "-frames:v", "1", "-vf",
+                              "scale=64:64:flags=area,format=rgba", "-f", "rawvideo", "-"], capture_output=True,
+                             timeout=20, stdin=subprocess.DEVNULL, **NO_WINDOW).stdout
+        a = np.frombuffer(raw, np.uint8).reshape(64, 64, 4).astype(int)
+        if (a[..., 3] < 128).mean() > 0.05:
+            key = "alpha"
+        else:
+            edge = np.concatenate([a[:3].reshape(-1, 4), a[-3:].reshape(-1, 4), a[:, :3].reshape(-1, 4),
+                                   a[:, -3:].reshape(-1, 4)])[:, :3]
+            med = np.median(edge, 0)
+            share = (np.abs(edge - med).max(1) < 40).mean()
+            r, g, b = med
+            green = g > 120 and g > r + 50 and g > b + 50
+            if share > 0.7 and (green or max(r, g, b) < 40 or min(r, g, b) > 215):
+                sim = 0.30 if green else 0.12
+                key = f"0x{int(r):02X}{int(g):02X}{int(b):02X}:{sim}"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        key = ""
+    _keys[path] = key
+    return key
+
+
 def my_sound(name: str) -> str:
     """Your own sound for ``name`` ("triple" / "airhorn"...) from :func:`my_sounds_dir`, or ""."""
     d = my_sounds_dir()
@@ -633,6 +686,7 @@ class Assets:
         self.user_triple = triple_sound if triple_sound and os.path.isfile(triple_sound) else my_sound("triple")
         self._cache: Dict[str, Optional[str]] = {}
         self.prev_flavor: set = set()            # gag sounds the previous clip used (auto mode: vary them)
+        self.prev_memes: List[str] = []          # video memes used recently (vary them)
         os.makedirs(folder, exist_ok=True)
 
     def _img(self, key: str, make) -> str:
@@ -641,6 +695,14 @@ class Assets:
             make().save(path)
             self._cache[key] = path
         return self._cache[key]  # type: ignore[return-value]
+
+    def size_of(self, path: str) -> Tuple[int, int]:
+        """Width/height of an image or a video clip."""
+        if not path.lower().endswith((".mov", ".mp4", ".webm", ".gif")):
+            return self.size(path)
+        from .video import probe
+        i = probe(path)
+        return i.width, i.height
 
     def size(self, path: str) -> Tuple[int, int]:
         with Image.open(path) as im:
@@ -678,6 +740,37 @@ class Assets:
 
     def smoke(self) -> str:
         return self._img("smoke", lambda: rainbow_smoke(int(self.H * 0.45)))
+
+    def meme(self, path: str, height: float, seconds: float, fps: float = 30.0) -> Optional[str]:
+        """A cut-out, looped, ``seconds``-long copy of an animated meme at this size (PNG-in-MOV with alpha)."""
+        key_ = f"meme:{path}:{height}:{seconds:.2f}:{fps:g}"
+        if key_ in self._cache:
+            return self._cache[key_]
+        from .video import NO_WINDOW, find_ffmpeg
+        out = os.path.join(self.dir, f"meme_{len(self._cache):03d}.mov")
+        h = max(16, int(self.H * height) // 2 * 2)
+        k = detect_key(path)
+        vf = f"fps={fps:g},scale=-2:{h}:flags=bicubic,format=rgba"
+        if k and k != "alpha":
+            col, sim = k.split(":")
+            vf += f",colorkey={col}:{sim}:0.08"
+            if col.startswith("0x") and int(col[4:6], 16) > int(col[2:4], 16) + 50:      # green screen: despill
+                vf += ",despill=type=green"
+        elif not k:                                    # a framed pop-up window
+            b = max(2, h // 60)
+            vf += f",pad=iw+{2 * b}:ih+{2 * b}:{b}:{b}:color=white"
+        loop = ["-ignore_loop", "0"] if path.lower().endswith(".gif") else ["-stream_loop", "-1"]
+        if path.lower().endswith(".png"):
+            loop = ["-loop", "1", "-framerate", f"{fps:g}"]
+        cmd = [find_ffmpeg(), "-v", "error", "-y", *loop, "-t", f"{seconds:.2f}", "-i", path, "-an", "-vf", vf,
+               "-t", f"{seconds:.2f}", "-c:v", "png", "-pix_fmt", "rgba", out]
+        try:
+            subprocess.run(cmd, check=True, timeout=120, stdin=subprocess.DEVNULL, capture_output=True, **NO_WINDOW)
+            res: Optional[str] = out if os.path.isfile(out) and os.path.getsize(out) > 1000 else None
+        except (OSError, subprocess.SubprocessError):
+            res = None
+        self._cache[key_] = res
+        return res
 
     def text(self, word: str, style: str, height: float = 0.11, kind: str = "impact") -> str:
         return self._img(f"t:{word}:{style}:{height}:{kind}", lambda: meme_text(word, int(self.H * height), style, kind))
@@ -764,6 +857,10 @@ TOGGLES: Dict[str, Tuple[str, bool, str]] = {
     "mlg_headshot_sound": ("Headshot voice", True, "'Best ever headshot' on headshots (headshot.mp3)"),
     "mlg_mtndew_sound": ("Mtn Dew baby", True, "'I'm talking about Mountain Dew baby' with the flying logo (mtndew.mp3)"),
     "mlg_intro": ("Intro sting", True, "MLG sting at the start of the video (pwnage.mp3)"),
+    "mlg_videomemes": ("Video memes", True, "Animated memes (frog, Snoop, nyan cat… and your own stickers) "
+                       "pop in on triples and multi-kills"),
+    "mlg_beat": ("On the beat", True, "With music: the picture pumps on every beat, colours jump on the beat "
+                 "and the biggest kill lands on the song's drop"),
     "mlg_fbi": ("FBI OPEN UP", True, "On 4+ kills in a few seconds (uses fbi.mp3 from your sounds folder)"),
     "mlg_siren": ("Siren", False, "Wee-woo siren on triples"),
     "mlg_bassboost": ("Bass boost", True, "Distorted, bass-boosted audio during triples"),
@@ -791,6 +888,7 @@ class Sticker:
     a: float                # shown from/to (clip time)
     b: float
     rot: str = ""           # rotate filter angle expression (sticker-local t), "" = none
+    video: bool = False     # an animated clip (plays from its own start), not a still image
     prio: int = 5           # lower = kept first when there are too many
     layer: int = 3          # drawing order (0 = bottom)
 
@@ -908,7 +1006,7 @@ def schedule_voices(sfx: Sequence[Tuple[float, str, float, int]], dur: float, o=
 def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, assets: Assets,
          rng: random.Random, triples: Optional[Sequence[float]] = None,
          captions: Sequence[Tuple[float, str]] = (), first: bool = False, last: bool = False,
-         replay: bool = False) -> Plan:
+         replay: bool = False, beats: Optional[Sequence[float]] = None, drop: Optional[float] = None) -> Plan:
     """Stickers, sounds and filters for one clip. ``kills``/``captions`` are in clip time."""
     D = defaults()
     on = lambda k: bool(getattr(o, k, D.get(k)))  # noqa: E731
@@ -991,7 +1089,15 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
             bw, bh = assets.size(bp)
             x = rng.uniform(W * 0.15, W * 0.85) - bw / 2
             y = rng.uniform(H * 0.3, H * 0.7) - bh / 2
-            pl.stickers.append(Sticker(bp, f"{x:.0f}", f"{y:.0f}", t, until(t, 0.7), rot="0.3*t", prio=3, layer=3))
+            gs = [p for p in my_stickers() if _slot(p) == "explosion_gs"]
+            clip = assets.meme(gs[0], 0.6, 1.4) if gs and on("mlg_videomemes") else None
+            if clip:                                   # the real green-screen fireball
+                cw, ch = assets.size_of(clip)
+                pl.stickers.append(Sticker(clip, f"{x + bw / 2 - cw / 2:.0f}", f"{y + bh / 2 - ch / 2:.0f}", t,
+                                           until(t, 1.4), prio=3, layer=3, video=True))
+            else:
+                pl.stickers.append(Sticker(bp, f"{x:.0f}", f"{y:.0f}", t, until(t, 0.7), rot="0.3*t", prio=3,
+                                           layer=3))
             snd(t, assets.boom_wav(), 0.8, 3)
             shake.append((t, until(t, 0.4)))
         for _ in range(lvl["cans"] + (1 if c >= 2 else 0)):
@@ -1015,6 +1121,8 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
             _flying(pl, assets.logo(), assets, W, H, t + 0.2, dur, rng, prio=2)  # type: ignore[arg-type]
             if on("mlg_mtndew_sound") and t not in trip:
                 snd(t + 0.3, assets.mine("mtndew"), 1.0, 3)
+        if c >= 2 and t not in trip and on("mlg_videomemes") and lvl is not _COUNTS["mild"]:
+            _video_meme(pl, assets, W, H, t, dur, rng)
         if c >= 2 and t not in trip:
             if on("mlg_extras"):
                 _money(pl, assets, W, H, t, dur, rng, lvl["bills"] // 2)
@@ -1069,6 +1177,9 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
                     snd(a, assets.hit_wav(), 0.6, 6)
         if on("mlg_logo") and assets.logo():
             _flying(pl, assets.logo(), assets, W, H, t + 0.6, dur, rng, prio=2)  # type: ignore[arg-type]
+        if on("mlg_videomemes"):
+            for k in range({"mild": 1, "normal": 2, "max": 3}[_level_name(lvl)]):
+                _video_meme(pl, assets, W, H, t + 0.2 + 0.5 * k, dur, rng)
         for _ in range(lvl["cans"] + 1):
             if on("mlg_cans"):
                 _flying(pl, assets.can(), assets, W, H, t + rng.uniform(0.2, 1.2), dur, rng, prio=3)
@@ -1141,8 +1252,19 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
     for i, (t, f, _) in enumerate(pl.sfx):
         nxt = next((t2 for t2, f2, _ in pl.sfx[i + 1:] if f2 == f), None)
         pl.lens.append(max(0.08, nxt - t) if nxt is not None else None)
-    pl.vf = strobe_filters(getattr(o, "mlg_strobe", "normal"), strobe, flashes, fry)
+    grid = beat_grid(beats) if beats else None
+    if grid and drop is not None and 0 <= drop < dur:            # the drop: one more big hit
+        flashes.append(drop)
+        shake.append((drop, min(dur, drop + 0.5)))
+        strobe.append((drop, min(dur, drop + 1.0)))
+    if grid:
+        # snap the start of each flash to the nearest beat (if one is close), and flash on the beats in big windows
+        flashes = [_snap(f, grid, 0.12) for f in flashes]
+        flashes += [b for a, e in fry for b in beats if a <= b <= e]     # type: ignore[union-attr]
+    pl.vf = strobe_filters(getattr(o, "mlg_strobe", "normal"), strobe, flashes, fry, grid)
     pl.vf_post = motion_filters(W, H, spins, shake)          # spin/shake everything, stickers included
+    if grid and getattr(o, "mlg_strobe", "normal") != "off":
+        pl.vf_post += beat_pump(W, H, grid, getattr(o, "fps", None) or 30.0)
     used = {f for _, f, _ in pl.sfx if _slot(f) in FLAVOR_SLOTS}
     assets.prev_flavor = used                                # the next clip avoids these
     pl.duck = [(a, b) for a, b in pl.duck if any(abs(t - a) < 1e-6 for t, _, _ in pl.sfx)]
@@ -1150,6 +1272,35 @@ def plan(kills: Sequence[Tuple[float, int]], dur: float, W: int, H: int, o, asse
         en = "+".join(_b(a, b) for a, b in bass)
         pl.af = f",bass=g=14:f=90:enable='{en}',volume=1.6:enable='{en}',asoftclip=type=hard:enable='{en}'"
     return pl
+
+
+def beat_grid(beats: Sequence[float]) -> Optional[Tuple[float, float]]:
+    """(phase, period) of a steady beat, from detected beat times in clip time."""
+    b = sorted(beats)
+    if len(b) < 2:
+        return None
+    period = float(np.median(np.diff(b)))
+    if not 0.25 <= period <= 1.2:
+        return None
+    phase = float(np.median([(x - b[0]) % period for x in b])) + b[0]
+    return phase % period, period
+
+
+def _snap(t: float, grid: Tuple[float, float], within: float) -> float:
+    ph, per = grid
+    n = round((t - ph) / per)
+    b = ph + n * per
+    return b if abs(b - t) <= within and b >= 0 else t
+
+
+def beat_pump(W: int, H: int, grid: Tuple[float, float], fps: float) -> str:
+    """Punch the picture in a little on every beat (twice as hard on the bar's first beat)."""
+    ph, per = grid
+    pulse = f"exp(-mod(it-{ph:.4f}+{per * 64:.4f}\\,{per:.4f})/0.07)"
+    bar = f"exp(-mod(it-{ph:.4f}+{per * 64:.4f}\\,{per * 4:.4f})/0.09)"
+    z = f"1+0.025*{pulse}+0.03*{bar}"
+    return (f",zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={fps:g},"
+            f"setsar=1")
 
 
 def motion_filters(W: int, H: int, spins: Sequence[Tuple[float, float]],
@@ -1165,6 +1316,42 @@ def motion_filters(W: int, H: int, spins: Sequence[Tuple[float, float]],
         vf += (f",split[msa][msb];[msb]crop={W - 2 * sh}:{H - 2 * sh}:x='{sh}+{sh}*sin(t*83)':"
                f"y='{sh}+{sh}*cos(t*67)',scale={W}:{H},setsar=1[msc];[msa][msc]overlay=0:0:enable='{on}'")
     return vf
+
+
+def _level_name(lvl) -> str:
+    return next((k for k, v in _COUNTS.items() if v is lvl), "normal")
+
+
+def _video_meme(pl: Plan, assets: Assets, W: int, H: int, t: float, dur: float, rng: random.Random) -> None:
+    """Pop an animated meme in at a random side of the screen (not the same one as last time)."""
+    pool = [p for p in my_stickers() if _slot(p) != "explosion_gs"]
+    if not pool or t >= dur:
+        return
+    fresh = [p for p in pool if p not in assets.prev_memes[-max(1, len(pool) - 1):]] or pool
+    path = rng.choice(fresh)
+    assets.prev_memes.append(path)
+    life = min(dur - t, rng.uniform(1.6, 2.4))
+    if life < 0.5:
+        return
+    clip = assets.meme(path, rng.uniform(0.36, 0.5), life)
+    if not clip:
+        return
+    w, h = assets.size_of(clip)
+    side = rng.choice(("left", "right", "bottom"))
+    x0 = (rng.uniform(0, 0.08) * W if side == "left" else
+          (W - w - rng.uniform(0, 0.08) * W if side == "right" else rng.uniform(0.2, 0.8) * W - w / 2))
+    y0 = rng.uniform(0.3, 0.55) * H if side != "bottom" else H - h
+    # slides in from its side in 0.15 s, then wobbles a little
+    if side == "left":
+        x = f"{x0:.0f}-max(0\\,1-(t-{t:.3f})/0.15)*{w + x0:.0f}"
+        y = f"{y0:.0f}"
+    elif side == "right":
+        x = f"{x0:.0f}+max(0\\,1-(t-{t:.3f})/0.15)*{W - x0:.0f}"
+        y = f"{y0:.0f}"
+    else:
+        x = f"{x0:.0f}"
+        y = f"{y0:.0f}+max(0\\,1-(t-{t:.3f})/0.15)*{h:.0f}"
+    pl.stickers.append(Sticker(clip, x, y, t, t + life, prio=1, layer=3, video=True))
 
 
 def _flying(pl: Plan, png: str, assets: Assets, W: int, H: int, t: float, dur: float, rng: random.Random,
@@ -1216,13 +1403,17 @@ def _money(pl: Plan, assets: Assets, W: int, H: int, t: float, dur: float, rng: 
 
 
 def strobe_filters(level: str, windows: Sequence[Tuple[float, float]], flashes: Sequence[float],
-                   fry: Sequence[Tuple[float, float]]) -> str:
+                   fry: Sequence[Tuple[float, float]], grid: Optional[Tuple[float, float]] = None) -> str:
     """Hue-cycling, over-saturation, white flashes (strobe) and deep-fry during the given windows."""
     vf = ""
     if level != "off" and windows:
         on = "+".join(_b(a, b) for a, b in windows)
         w = f"min(1\\,{on})"
-        vf += f",hue=h='540*t*({w})':s='1+1.6*({w})'"
+        if grid:                       # colours jump a step on each beat instead of drifting
+            ph, per = grid
+            vf += f",hue=h='77*floor((t-{ph:.4f})/{per:.4f})*({w})':s='1+1.6*({w})'"
+        else:
+            vf += f",hue=h='540*t*({w})':s='1+1.6*({w})'"
         if level in ("normal", "max"):
             fl = "+".join(_b(t, t + 0.06) for t in flashes) or "0"
             vf += f",eq=contrast='1+0.35*({w})':brightness='0.45*min(1\\,{fl})':eval=frame"

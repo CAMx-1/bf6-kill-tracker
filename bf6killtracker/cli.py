@@ -246,6 +246,21 @@ def cmd_analyze(a: argparse.Namespace) -> int:
     if a.csv:
         write_csv(results, a.csv)
         print(f"wrote {a.csv}")
+    if a.shorts and results:
+        from .hype import score_result
+        from .shorts import export_shorts, plan_shorts, short_options
+        cands = [c for r in results for c in score_result(r)]
+        picks = plan_shorts(cands, {r.video: r.duration for r in results}, a.shorts_count, a.shorts_min,
+                            a.shorts_max)
+        o = short_options(a.shorts_template)
+        apply_look_args(a, o)
+
+        def sp(f: float, msg: str) -> None:
+            if not a.quiet:
+                print(f"\r  shorts: {f * 100:5.1f}%  {msg[:50]:<50}", end="", file=sys.stderr, flush=True)
+
+        for f in export_shorts(picks, a.shorts, o, progress=sp):
+            print(f"\nwrote {f}")
     return 0 if results else 1
 
 
@@ -370,6 +385,12 @@ def build_parser() -> argparse.ArgumentParser:
     an.add_argument("--denoise", action="store_true", help="reduce background noise in the game/mic audio")
     an.add_argument("--loudnorm", action="store_true", help="even out loudness (YouTube level)")
     an.add_argument("--thumbnail", metavar="FILE.jpg", help="with --reel: also save a YouTube thumbnail")
+    an.add_argument("--shorts", metavar="FOLDER", help="also export one vertical Short per top moment into FOLDER")
+    an.add_argument("--shorts-count", type=int, default=5, metavar="N")
+    an.add_argument("--shorts-min", type=float, default=15.0, metavar="S", help="shortest Short (s)")
+    an.add_argument("--shorts-max", type=float, default=30.0, metavar="S", help="longest Short (s)")
+    an.add_argument("--shorts-template", default="TikTok hype", choices=list(TEMPLATES),
+                    help="look of the Shorts (e.g. \"MLG TikTok\")")
     add_look_args(an)
     from .hype import ORDERS, THEMES
     an.add_argument("--montage-theme", choices=list(THEMES), default="Everything")
@@ -506,8 +527,8 @@ def cmd_preview(a: argparse.Namespace) -> int:
 
 def cmd_sounds(a: argparse.Namespace) -> int:
     from .mlg import my_sounds_dir
-    from .soundpack import download
-    res = download(only_missing=not a.force,
+    from .soundpack import download_all
+    res = download_all(only_missing=not a.force,
                    progress=lambda i, n, m: print(f"  {i + 1}/{n} {m}" if m != "done" else "", file=sys.stderr))
     for slot, r in res.items():
         print(f"{slot:16} {r}")

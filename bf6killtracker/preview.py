@@ -31,8 +31,9 @@ class _Decoder(QThread):
     ended = Signal(int)
 
     def __init__(self, gen: int, path: str, start: float, duration: float, offset: float,
-                 hold_first: bool = False, parent=None):
+                 hold_first: bool = False, parent=None, size=(PREVIEW_W, PREVIEW_H)):
         super().__init__(parent)
+        self.size_ = size
         # (not "self.start": that would shadow QThread.start)
         self.gen, self.path, self.clip_start, self.duration, self.offset = gen, path, start, duration, offset
         self.hold_first = hold_first   # show one frame, then wait paused
@@ -51,7 +52,7 @@ class _Decoder(QThread):
             self._play.set()
 
     def run(self) -> None:
-        w, h, fps = PREVIEW_W, PREVIEW_H, PREVIEW_FPS
+        (w, h), fps = self.size_, PREVIEW_FPS
         remaining = max(0.05, self.duration - self.offset)
         cmd = [find_ffmpeg(), "-v", "error", "-nostdin", "-threads", "0",
                "-ss", f"{self.clip_start + self.offset:.3f}", "-t", f"{remaining:.3f}", "-i", self.path,
@@ -97,10 +98,13 @@ class _Decoder(QThread):
 class PreviewPlayer(QWidget):
     """Plays ``[start, end]`` of a video inside the window, at preview quality."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, size=(PREVIEW_W, PREVIEW_H), sound: bool = False):
         super().__init__(parent)
+        self.size_ = size
+        self.sound = sound              # play the audio too (through mlg.play_sound, in step with the picture)
+        self._audio_pending = False
         self.screen_lbl = QLabel("Select a streak or kill to preview it here")
-        self.screen_lbl.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.screen_lbl.setFixedSize(*size)
         self.screen_lbl.setAlignment(Qt.AlignCenter)
         self.screen_lbl.setStyleSheet("background:#111; color:#777; border-radius:4px;")
         self.screen_lbl.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -140,6 +144,7 @@ class PreviewPlayer(QWidget):
     # -- public API ----------------------------------------------------------
     def load(self, path: str, start: float, end: float, autoplay: bool = True) -> None:
         self.path, self.start, self.duration = path, max(0.0, start), max(0.1, end - start)
+        self._wav = self._extract_audio() if self.sound else ""
         self.pos = 0.0
         self._set_enabled(True)
         self.seek(0.0, play=autoplay)
@@ -160,8 +165,10 @@ class PreviewPlayer(QWidget):
             self.playing = False
             if self._dec:
                 self._dec.set_paused(True)
+            self._stop_audio()
         else:
-            if self._dec is None or self.pos >= self.duration - 0.05:
+            if self._dec is None or self.pos >= self.duration - 0.05 or self.sound:
+                # (with sound, restart from here so picture and audio start together)
                 self.seek(0.0 if self.pos >= self.duration - 0.05 else self.pos, play=True)
                 return
             self.playing = True
@@ -172,12 +179,15 @@ class PreviewPlayer(QWidget):
         if not self.path:
             return
         self.pos = min(max(0.0, pos), self.duration)
+        self._stop_audio()
+        self._audio_pending = bool(play and self.sound and self._prepare_audio(self.pos))
         self._start_decoder(self.pos, hold_first=not play)
         self.playing = play
         self._update_button()
         self._update_time()
 
     def shutdown(self) -> None:
+        self._stop_audio()
         self._stop_decoder()
         for d in self._old:
             d.wait(2000)
@@ -197,7 +207,7 @@ class PreviewPlayer(QWidget):
     def _start_decoder(self, offset: float, hold_first: bool = False) -> None:
         self._stop_decoder()
         self._gen += 1
-        d = _Decoder(self._gen, self.path, self.start, self.duration, offset, hold_first, self)
+        d = _Decoder(self._gen, self.path, self.start, self.duration, offset, hold_first, self, self.size_)
         d.frame.connect(self._on_frame)
         d.ended.connect(self._on_ended)
         self._dec = d
@@ -206,6 +216,13 @@ class PreviewPlayer(QWidget):
     def _on_frame(self, gen: int, img: QImage, pos: float) -> None:
         if gen != self._gen:
             return
+        if self._audio_pending:          # the first frame is up: start the sound from the same moment
+            self._audio_pending = False
+            from .mlg import play_sound
+            try:
+                play_sound(self.audio_file)
+            except Exception:
+                pass
         self.screen_lbl.setPixmap(QPixmap.fromImage(img))
         self.pos = pos
         self._update_time()
@@ -216,8 +233,48 @@ class PreviewPlayer(QWidget):
         self.playing = False
         self.pos = self.duration
         self._dec = None
+        self._stop_audio()
         self._update_button()
         self._update_time()
+
+    def _extract_audio(self) -> str:
+        """The clip's sound as one WAV (cut from it on every seek, so starting is instant)."""
+        import os
+        import tempfile
+        out = os.path.join(tempfile.gettempdir(), "bf6kt_listen", f"pvfull_{id(self)}.wav")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        try:
+            subprocess.run([find_ffmpeg(), "-v", "error", "-y", "-ss", f"{self.start:.3f}", "-t",
+                            f"{self.duration:.3f}", "-i", self.path, "-vn", "-ac", "2", "-ar", "44100",
+                            "-c:a", "pcm_s16le", out], check=True, timeout=60, stdin=subprocess.DEVNULL,
+                           capture_output=True, **NO_WINDOW)
+            return out
+        except Exception:
+            return ""
+
+    def _prepare_audio(self, pos: float) -> bool:
+        import os
+        import wave
+        self.audio_file = ""
+        if not getattr(self, "_wav", ""):
+            return False
+        out = self._wav[:-4] + f"_{self._gen % 2}.wav"
+        try:
+            with wave.open(self._wav) as r:
+                r.setpos(min(r.getnframes(), int(pos * r.getframerate())))
+                data = r.readframes(r.getnframes())
+                with wave.open(out, "wb") as w:
+                    w.setparams(r.getparams())
+                    w.writeframes(data)
+            self.audio_file = out
+            return os.path.getsize(out) > 100
+        except Exception:
+            return False
+
+    def _stop_audio(self) -> None:
+        if self.sound:
+            from .mlg import stop_sound
+            stop_sound()
 
     def _update_button(self) -> None:
         self.btn.setIcon(self._icon_pause if self.playing else self._icon_play)

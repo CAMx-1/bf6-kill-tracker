@@ -70,6 +70,7 @@ class ReelOptions:
     overlays: bool = False                      # kill call-outs ("TRIPLE KILL", running count)
     callout: Optional["CalloutStyle"] = None    # look/placement of call-outs (default style if None)
     titles: bool = False                        # clip title (e.g. video name/date) at the start of each clip
+    title_top: bool = False                     # big hook title at the top for the first seconds (Shorts)
     # replay
     replay: bool = False                        # slow-motion replay of each clip's key kill
     replay_speed: float = 0.5
@@ -133,6 +134,9 @@ class ReelOptions:
     mlg_shake: bool = True
     mlg_wub: bool = True
     mlg_fbi: bool = True
+    mlg_videomemes: bool = True
+    mlg_beat: bool = True                       # MLG pulses/flashes on the music's beats, big moment on the drop
+    music_offset: float = 0.0                   # start the song this far in (set by MLG drop alignment)
     mlg_wow: bool = True
     mlg_what: bool = True
     mlg_omgwow: bool = True
@@ -470,6 +474,8 @@ class _Part:
     dur: float
     speed: float = 1.0           # < 1: slow motion replay
     replay: bool = False
+    beats: List[float] = field(default_factory=list)   # music beats inside this part (output-clip time)
+    drop: Optional[float] = None                        # the song's drop, if it lands in this part
 
     @property
     def out_dur(self) -> float:
@@ -518,7 +524,15 @@ def _overlay_specs(p: _Part, o: ReelOptions, W: int, H: int, tmp: str, n: int):
         w, h = render_text(path, "REPLAY", int(H * 0.045), color=(255, 210, 80), **common)
         specs.append((path, int(W * 0.04), int(H * 0.06), 0.0, p.out_dur))
         return specs
-    if o.titles and p.seg.title:
+    if o.titles and p.seg.title and o.title_top:      # Shorts hook: big, top, the first 3 s
+        from .mlg import meme_text
+        img = meme_text(p.seg.title, int(min(W, H) * 0.075), "yellow")
+        if img.width > W * 0.94:
+            img = img.resize((int(W * 0.94), int(img.height * W * 0.94 / img.width)))
+        path = os.path.join(tmp, f"ov{n}_hook.png")
+        img.save(path)
+        specs.append((path, (W - img.width) // 2, int(H * 0.17), 0.0, min(p.out_dur, 3.2)))
+    elif o.titles and p.seg.title:
         path = os.path.join(tmp, f"ov{n}_title.png")
         w, h = render_text(path, p.seg.title, int(H * 0.035), color=st.color, **common)
         specs.append((path, (W - w) // 2, int(H * 0.82) - h, 0.2, min(p.out_dur, 3.0)))
@@ -642,7 +656,10 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     stickers = list(mlg.stickers) if mlg else []
     st_inputs = []
     for s_ in stickers:
-        cmd += ["-loop", "1", "-framerate", f"{F:g}", "-t", f"{max(0.05, s_.b - s_.a):.3f}", "-i", s_.png]
+        if s_.video:                       # pre-cut animated meme, plays once from its own start
+            cmd += ["-t", f"{max(0.05, s_.b - s_.a):.3f}", "-i", s_.png]
+        else:
+            cmd += ["-loop", "1", "-framerate", f"{F:g}", "-t", f"{max(0.05, s_.b - s_.a):.3f}", "-i", s_.png]
         st_inputs.append(idx)
         idx += 1
     sfx_all = list(mlg.sfx) if mlg else []
@@ -671,7 +688,8 @@ def _part_cmd(ffmpeg: str, p: _Part, info, o: ReelOptions, W: int, H: int, F: fl
     last = "v0"
     for j, (s_, inp) in enumerate(zip(stickers, st_inputs)):
         rot = (f",rotate=a='{s_.rot}':c=black@0:ow='hypot(iw\\,ih)':oh='hypot(iw\\,ih)'" if s_.rot else "")
-        graph.append(f"[{inp}:v]format=rgba{rot},setpts=PTS+{s_.a:.3f}/TB[m{j}]")
+        fr = f"fps={F:g}," if s_.video else ""
+        graph.append(f"[{inp}:v]{fr}format=rgba{rot},setpts=PTS-STARTPTS+{s_.a:.3f}/TB[m{j}]")
         graph.append(f"[{last}][m{j}]overlay=x='{s_.x}':y='{s_.y}':eof_action=pass[mv{j}]")
         last = f"mv{j}"
     if mlg and mlg.vf_post:
@@ -873,6 +891,11 @@ def build_reel(
         _, beats = detect_beats(load_mono(o.music, max_s=sum(p.out_dur for p in parts) + 30))
         _beat_sync(parts, beats, infos)
     total = sum(p.out_dur for p in parts) or 1.0
+    if o.mlg and o.mlg_beat and o.music and not gif:
+        try:
+            _mlg_beat_grid(parts, o)
+        except Exception:               # beat analysis is a bonus; never fail the build over it
+            pass
 
     enc = pick_encoder(ffmpeg, o.encoder)
     tmp = tempfile.mkdtemp(prefix="bf6reel_")
@@ -971,6 +994,49 @@ def _encode_parts(ffmpeg, parts, infos, o, W, H, F, enc, bitrate, tmp, report, s
     return files
 
 
+def _mlg_beat_grid(parts: List["_Part"], o: ReelOptions) -> None:
+    """Find the song's beats and drop; start the song so the drop hits the reel's biggest moment;
+    give each part its beats (and the drop) in its own time."""
+    import numpy as np
+    from .mlg import find_triples
+    from .music import SR as MSR, detect_beats, find_drop, load_mono
+    y = load_mono(o.music, max_s=900)
+    song = len(y) / MSR
+    if song < 2:
+        return
+    _, beats = detect_beats(y)
+    drop = find_drop(y)
+    card = max(1.0, o.card_s) if o.intro_text else 0.0
+    durs = ([card] if card else []) + [p.out_dur for p in parts]
+    xf = min(o.transition_s, min(durs) / 3) if _XFADE.get(o.transition) and len(durs) > 1 else 0.0
+    starts, t = [], card - xf if card else 0.0
+    for p in parts:
+        starts.append(t)
+        t += p.out_dur - xf
+    # the biggest moment: a triple (3+ kills in 4 s), else the biggest multi-kill; the later one wins ties
+    best, big = (-1.0, 0.0), None
+    for p, st in zip(parts, starts):
+        if p.replay:
+            continue
+        ks = [((k - p.start) / p.speed, c) for k, c in p.seg.kills if 0 <= (k - p.start) / p.speed <= p.out_dur]
+        for kt, c in ks:
+            score = c + (3 if kt in find_triples(ks) else 0)
+            if (score, st + kt) >= best:
+                best, big = (score, st + kt), st + kt
+    off = 0.0
+    if drop is not None and big is not None:
+        loops = 0 if drop >= big else int(np.ceil((big - drop) / song))   # the song loops: use a later pass
+        off = drop + loops * song - big
+        drop = drop + loops * song
+    o.music_offset = off
+    grid = [b + k * song - off for k in range(int((sum(durs) + off) / song) + 2) for b in beats]
+    grid = [g for g in grid if g >= 0]
+    for p, st in zip(parts, starts):
+        p.beats = [g - st for g in grid if 0 <= g - st < p.out_dur]
+        if drop is not None and 0 <= drop - off - st < p.out_dur:
+            p.drop = drop - off - st
+
+
 def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = False, last: bool = False,
               pos: float = 0.0):
     import random
@@ -986,7 +1052,8 @@ def _mlg_plan(p: _Part, o: ReelOptions, W: int, H: int, assets, first: bool = Fa
     kills = [((t - p.start) / p.speed, c) for t, c in p.seg.kills]
     caps = [((t - p.start) / p.speed, c) for t, c in p.seg.captions]
     rng = random.Random(f"{os.path.basename(p.seg.video)}|{p.start:.2f}|{p.replay}|{o.mlg_seed}")
-    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first, last=last, replay=p.replay)
+    return plan(kills, p.out_dur, W, H, o, assets, rng, captions=caps, first=first, last=last, replay=p.replay,
+                beats=p.beats if o.mlg_beat else None, drop=p.drop if o.mlg_beat else None)
 
 
 # audio of the intermediate clips: uncompressed, so joined clips add up to exactly their lengths
@@ -1025,7 +1092,9 @@ def _xfade_join(ffmpeg: str, files: List[str], durs: List[float], out: str, kind
 
 def _mix_music(ffmpeg: str, video: str, o: ReelOptions, total: float, out: str, abr: str = "192k") -> None:
     fade_out = min(3.0, total / 4)
-    music = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim=0:{total:.3f},asetpts=N/SR/TB,"
+    off = max(0.0, getattr(o, "music_offset", 0.0))
+    music = (f"[1:a]aresample=48000,aformat=channel_layouts=stereo,atrim={off:.3f}:{off + total:.3f},"
+             f"asetpts=N/SR/TB,"
              f"volume={o.music_volume:g},afade=t=in:st=0:d=0.5,"
              f"afade=t=out:st={max(0.0, total - fade_out):.3f}:d={fade_out:.3f}")
     if o.duck:

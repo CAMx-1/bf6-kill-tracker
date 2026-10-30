@@ -88,3 +88,38 @@ def snap_to_beats(durations: List[float], beats: List[float], min_len: float = 1
         out.append(cut - cum)
         cum = cut
     return out
+
+
+def find_drop(y: np.ndarray, sr: int = SR, min_t: float = 4.0) -> Optional[float]:
+    """Time (s) of the song's drop: the biggest sustained jump in bass/overall energy after ``min_t``.
+
+    Compares the 2 s after each point with the 4 s before it (low band weighted double) and returns the
+    strongest rise, snapped to the nearest onset. None for songs too short or flat.
+    """
+    if len(y) < sr * (min_t + 4):
+        return None
+    hop = 512
+    n = len(y) // hop
+    fr = y[:n * hop].reshape(n, hop)
+    rms = np.sqrt((fr ** 2).mean(1) + 1e-12)
+    # crude bass: a moving average (low-pass) of the signal
+    k = max(1, sr // 150)
+    lp = np.convolve(y, np.ones(k) / k, "same")[:n * hop].reshape(n, hop)
+    bass = np.sqrt((lp ** 2).mean(1) + 1e-12)
+    e = np.log(rms + 2 * bass)
+    fps = sr / hop
+    a, b = int(4 * fps), int(2 * fps)
+    best, best_i = 0.0, None
+    for i in range(max(a, int(min_t * fps)), n - b):
+        rise = e[i:i + b].mean() - e[i - a:i].mean()
+        if rise > best:
+            best, best_i = rise, i
+    if best_i is None or best < 0.35:            # under ~1.4x louder: no real drop
+        return None
+    env = onset_envelope(y)
+    t = best_i / fps
+    oi = int(t * sr / HOP)
+    w = env[max(0, oi - int(0.4 * sr / HOP)):oi + int(0.4 * sr / HOP)]
+    if len(w):
+        t = (max(0, oi - int(0.4 * sr / HOP)) + int(np.argmax(w))) * HOP / sr
+    return float(t)

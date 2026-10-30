@@ -57,6 +57,31 @@ PACK: List[Clip] = [
          "e2f6af4c929160bc58efb6c0365d488c2cfd4ff5e905a7ea360f45d32b1e98ce", "Sandstorm (flute)"),
 ]
 
+_GIPHY = "https://media.giphy.com/media/{}/giphy.gif"
+# animated memes (stickers folder); "key" is filled in by mlg.detect_key at render time
+VIDEO_PACK: List[Clip] = [
+    Clip("frog", _GIPHY.format("2pGvpSk1wEooM"),
+         "987a9f27d5b2a38323f0df18c8dca0d6d8a9d9bda841ea4f2f56b64353ac5236", "Rainbow frog"),
+    Clip("datboi", _GIPHY.format("4Lr1TnWWfPwqs"),
+         "68aa5f583d516315f5f1a04e43bedee74d39780e70189edce69210ed7d3e3438", "Dat boi"),
+    Clip("nyan", _GIPHY.format("sIIhZliB2McAo"),
+         "6de2edc432d67a20a0d05382ff4672468de9c5bc689c4bebf1c868c9d37dd726", "Nyan cat"),
+    Clip("snoop", _GIPHY.format("dTxOCCvQOhRXa"),
+         "d5e4d40bfbb3a8f3968481a9540ce91925a07a3581e1fe1ed5e92007abe4f06f", "Snoop dancing"),
+    Clip("snoop_roof", _GIPHY.format("ii6Qkun2m31hm"),
+         "c83ae7fa94153549fb5ea9b1f651fc51b06af7feff534d8682343e71c39289af", "Snoop on the roof"),
+    Clip("sanic", _GIPHY.format("77er1c9H3KJnq"),
+         "afa30d2af9857c82e09150c0b4144ddd435cc99d295382b44688d40923894e31", "Sanic"),
+    Clip("dancekid", _GIPHY.format("5HFtrdH9r511m"),
+         "10d92c89e9be0d3ac0797ffabf03f7532b79210f91b32b4f609c0a3600f02dab", "Rekt dance"),
+    Clip("dealcat", _GIPHY.format("U634xW7LKU0sU"),
+         "dd39726f71f9f2d9f398d764a8c6de3b947c8cc355e04db22daf96d31a3670d7", "Deal with it cat"),
+    # CC BY 3.0, "EXPLOSION green screen (no copyright) - the chosen one", via Wikimedia Commons
+    Clip("explosion_gs", "https://upload.wikimedia.org/wikipedia/commons/d/df/"
+         "EXPLOSION_green_screen_%28no_copyright%29_-_the_chosen_one_%28720p%2C_h264%29.webm",
+         "a833b131c42a6cfaaef6fc5a11f2d8139bb6d68d3e6131b998778f9f1622a4bf", "Explosion (green screen)"),
+]
+
 _UA = "Mozilla/5.0 (BF6KillTracker; +https://github.com/CAMx-1/bf6-kill-tracker)"
 
 
@@ -67,11 +92,25 @@ def _folder(folder: Optional[str]) -> str:
     return my_sounds_dir()
 
 
-def missing(folder: Optional[str] = None) -> List[Clip]:
-    """Pack clips not in the sounds folder yet (any audio type with that name counts)."""
-    from .mlg import SOUND_EXTS
-    d = _folder(folder)
-    return [c for c in PACK if not any(os.path.isfile(os.path.join(d, c.slot + e)) for e in SOUND_EXTS)]
+def _video_folder(folder: Optional[str]) -> str:
+    if folder:
+        return folder
+    from .mlg import my_stickers_dir
+    return my_stickers_dir()
+
+
+def _ext(url: str) -> str:
+    e = os.path.splitext(url.split("?")[0])[1].lower()
+    return e if e in (".gif", ".webm", ".mp4", ".png", ".webp") else ".mp3"
+
+
+def missing(folder: Optional[str] = None, video: bool = False) -> List[Clip]:
+    """Pack clips not in the sounds (or stickers) folder yet (any file type with that name counts)."""
+    from .mlg import SOUND_EXTS, STICKER_EXTS
+    d = _video_folder(folder) if video else _folder(folder)
+    exts = STICKER_EXTS if video else SOUND_EXTS
+    pack = VIDEO_PACK if video else PACK
+    return [c for c in pack if not any(os.path.isfile(os.path.join(d, c.slot + e)) for e in exts)]
 
 
 def _fetch(url: str, timeout: float) -> bytes:
@@ -81,12 +120,14 @@ def _fetch(url: str, timeout: float) -> bytes:
 
 
 def download(folder: Optional[str] = None, *, only_missing: bool = True, timeout: float = 20.0,
-             progress: Optional[Callable[[int, int, str], None]] = None) -> Dict[str, str]:
-    """Download the pack. Returns {slot: "ok" | "skipped" | error text}. Never raises for a single clip."""
-    d = _folder(folder)
+             progress: Optional[Callable[[int, int, str], None]] = None, video: bool = False) -> Dict[str, str]:
+    """Download the sound pack (or, with ``video``, the animated meme pack).
+    Returns {slot: "ok" | "skipped" | error text}. Never raises for a single clip."""
+    d = _video_folder(folder) if video else _folder(folder)
     os.makedirs(d, exist_ok=True)
-    todo = missing(d) if only_missing else list(PACK)
-    out: Dict[str, str] = {c.slot: "skipped" for c in PACK if c not in todo}
+    pack = VIDEO_PACK if video else PACK
+    todo = missing(d, video) if only_missing else list(pack)
+    out: Dict[str, str] = {c.slot: "skipped" for c in pack if c not in todo}
     offline = False
     for i, c in enumerate(todo):
         if progress:
@@ -102,7 +143,7 @@ def download(folder: Optional[str] = None, *, only_missing: bool = True, timeout
             fd, tmp = tempfile.mkstemp(dir=d, suffix=".part")
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
-            os.replace(tmp, os.path.join(d, c.slot + ".mp3"))
+            os.replace(tmp, os.path.join(d, c.slot + _ext(c.url)))
             out[c.slot] = "ok"
         except Exception as exc:          # offline, blocked, timeout...
             out[c.slot] = f"{type(exc).__name__}: {exc}"
@@ -126,3 +167,12 @@ def ensure(timeout: float = 8.0) -> None:
     _tried = True
     if missing():
         download(timeout=timeout)
+    if missing(video=True):
+        download(timeout=timeout, video=True)
+
+
+def download_all(only_missing: bool = True, progress=None) -> Dict[str, str]:
+    """Sounds and animated memes."""
+    out = download(only_missing=only_missing, progress=progress)
+    out.update(download(only_missing=only_missing, progress=progress, video=True))
+    return out

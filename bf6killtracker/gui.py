@@ -204,9 +204,9 @@ class SoundPackWorker(Worker):
         self.only_missing = only_missing
 
     def run(self) -> None:
-        from .soundpack import download
+        from .soundpack import download_all
         try:
-            r = download(only_missing=self.only_missing, progress=lambda i, n, m: self.progress.emit(i, n, m))
+            r = download_all(only_missing=self.only_missing, progress=lambda i, n, m: self.progress.emit(i, n, m))
         except Exception as exc:
             r = {"pack": str(exc)}
         self.done.emit(r)
@@ -775,13 +775,20 @@ class MlgDialog(QDialog):
         b_dir = QPushButton("Open my sounds folder")
         b_dir.clicked.connect(lambda: (os.makedirs(my_sounds_dir(), exist_ok=True),
                                        open_with_system(my_sounds_dir())))
-        self.b_pack = QPushButton("Download meme sounds")
+        self.b_pack = QPushButton("Download memes")
         self.b_pack.setToolTip("Oh baby a triple, MLG air horn, FBI OPEN UP, Sandstorm… from myinstants.com "
                                "into your sounds folder (not included in the app because they're copyrighted)")
         self.b_pack.clicked.connect(self._pack_clicked)
         mine.addWidget(self.lbl_mine, 1)
+        b_st = QPushButton("Open stickers folder")
+        b_st.setToolTip("Animated memes. Drop your own GIF / WebM / MP4 / PNG in here: green-screen and plain "
+                        "black/white backgrounds are cut out automatically, anything else shows as a pop-up")
+        from .mlg import my_stickers_dir
+        b_st.clicked.connect(lambda: (os.makedirs(my_stickers_dir(), exist_ok=True),
+                                      open_with_system(my_stickers_dir())))
         mine.addWidget(self.b_pack)
         mine.addWidget(b_dir)
+        mine.addWidget(b_st)
         form2.addRow("My sounds", mine)
 
         btns = QHBoxLayout()
@@ -805,7 +812,7 @@ class MlgDialog(QDialog):
         self._load(self.v)
         self._pack_status()
         from .soundpack import missing
-        if missing() and not os.environ.get("BF6KT_NO_SOUND_DOWNLOAD"):
+        if (missing() or missing(video=True)) and not os.environ.get("BF6KT_NO_SOUND_DOWNLOAD"):
             self.download_pack()          # first time: fetch them automatically
 
     def _load(self, v: dict) -> None:
@@ -912,7 +919,7 @@ class MlgDialog(QDialog):
     def listen(self, kind: str) -> None:
         if kind not in self._BUILT_IN and not self._have(kind):
             QMessageBox.information(self, "Sound not downloaded",
-                                    "This meme sound isn't downloaded yet. Press “Download meme sounds”.")
+                                    "This meme sound isn't downloaded yet. Press “Download memes”.")
             return
         path = self.sound_path(kind)
         if not path:
@@ -940,15 +947,20 @@ class MlgDialog(QDialog):
 
     # -- meme sound pack -------------------------------------------------------
     def _pack_status(self) -> None:
-        from .soundpack import PACK, missing
-        miss = missing()
-        self.lbl_mine.setText(f"{len(PACK) - len(miss)} of {len(PACK)} meme sounds downloaded" if miss
-                              else f"All {len(PACK)} meme sounds downloaded")
-        self.b_pack.setText(f"Download meme sounds ({len(miss)})" if miss else "Re-download meme sounds")
+        from .mlg import my_stickers
+        from .soundpack import PACK, VIDEO_PACK, missing
+        miss = missing() + missing(video=True)
+        total = len(PACK) + len(VIDEO_PACK)
+        own = len(my_stickers()) - (len(VIDEO_PACK) - len(missing(video=True)))
+        extra = f", {own} of your own stickers" if own > 0 else ""
+        self.lbl_mine.setText((f"{total - len(miss)} of {total} meme sounds/videos downloaded" if miss
+                               else f"All {len(PACK)} meme sounds and {len(VIDEO_PACK)} video memes downloaded")
+                              + extra)
+        self.b_pack.setText(f"Download memes ({len(miss)})" if miss else "Re-download memes")
 
     def _pack_clicked(self) -> None:
         from .soundpack import missing
-        self.download_pack(only_missing=bool(missing()))
+        self.download_pack(only_missing=bool(missing() or missing(video=True)))
 
     def download_pack(self, only_missing: bool = True) -> None:
         if self._pack_worker is not None:
@@ -988,6 +1000,327 @@ class MlgDialog(QDialog):
     def _preview(self) -> None:
         p = self.parent()
         p.preview({**p.values(), **self.values(), "mlg": True})
+
+
+class LookPreviewDialog(QDialog):
+    """Plays a rendered look preview with sound; change the look on the right and re-render."""
+
+    def __init__(self, effects_dialog: "EffectsDialog", values: dict, path: str = ""):
+        super().__init__(effects_dialog)
+        from PySide6.QtWidgets import QGridLayout, QGroupBox, QScrollArea
+        from .mlg import INTENSITIES, STROBE_LABELS, STROBES, TOGGLES
+        from .preview import PreviewPlayer
+        from .reel import GRADES, TEMPLATES
+        self.ed = effects_dialog
+        self.v = dict(values)
+        self.setWindowTitle("Look preview")
+        lay = QHBoxLayout(self)
+        left = QVBoxLayout()
+        lay.addLayout(left)
+        self.player = PreviewPlayer(self, size=(640, 360), sound=True)
+        left.addWidget(self.player)
+        self.lbl = QLabel("")
+        self.lbl.setWordWrap(True)
+        left.addWidget(self.lbl)
+        brow = QHBoxLayout()
+        self.b_render = QPushButton("⟳ Re-render")
+        self.b_render.setToolTip("Render the preview again with the settings on the right (a few seconds)")
+        self.b_render.clicked.connect(self.render)
+        self.cb_autorender = QCheckBox("Re-render when I change something")
+        self.cb_autorender.setChecked(True)
+        b_open = QPushButton("Open in video player")
+        b_open.clicked.connect(lambda: self.path and open_with_system(self.path))
+        brow.addWidget(self.b_render)
+        brow.addWidget(self.cb_autorender)
+        brow.addStretch(1)
+        brow.addWidget(b_open)
+        left.addLayout(brow)
+        left.addStretch(1)
+
+        right = QVBoxLayout()
+        lay.addLayout(right)
+        form = QFormLayout()
+        right.addLayout(form)
+        self.cb_tpl = QComboBox()
+        self.cb_tpl.addItem("— keep current —", "")
+        for n in TEMPLATES:
+            self.cb_tpl.addItem(n, n)
+        self.cb_tpl.currentIndexChanged.connect(self._template)
+        form.addRow("Template", self.cb_tpl)
+        self.cb_grade = QComboBox()
+        for g in GRADES:
+            self.cb_grade.addItem(g, g)
+        form.addRow("Colour", self.cb_grade)
+        self.cb_tr = QComboBox()
+        for label, k in EffectsDialog.TRANSITIONS:
+            self.cb_tr.addItem(label, k)
+        form.addRow("Transitions", self.cb_tr)
+        self.cb_kc = QComboBox()
+        for label, k in EffectsDialog.KILLCAMS:
+            self.cb_kc.addItem(label, k)
+        form.addRow("Kill-cam", self.cb_kc)
+        self.cb_mlg = QCheckBox("MLG mode")
+        form.addRow("", self.cb_mlg)
+        self.cb_int = QComboBox()
+        for k in INTENSITIES:
+            self.cb_int.addItem(k.capitalize(), k)
+        form.addRow("Chaos", self.cb_int)
+        self.cb_strobe = QComboBox()
+        for k in STROBES:
+            self.cb_strobe.addItem(STROBE_LABELS[k], k)
+        form.addRow("Strobe", self.cb_strobe)
+        box = QGroupBox("MLG elements")
+        grid = QGridLayout(box)
+        self.toggles: Dict[str, QCheckBox] = {}
+        for i, (k, (label, _, tip)) in enumerate(TOGGLES.items()):
+            cb = QCheckBox(label)
+            cb.setToolTip(tip)
+            self.toggles[k] = cb
+            grid.addWidget(cb, i // 2, i % 2)
+        scroll = QScrollArea()
+        scroll.setWidget(box)
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(380)
+        right.addWidget(scroll, 1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Close")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Use these settings")
+        ok.setToolTip("Copy these settings back into Effects & branding")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        right.addLayout(btns)
+
+        self.path = ""
+        self._worker = None
+        self._dirty = False
+        self._loading = False
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(700)
+        self._timer.timeout.connect(self.render)
+        self._load(self.v)
+        for w_ in (self.cb_grade, self.cb_tr, self.cb_kc, self.cb_int, self.cb_strobe):
+            w_.currentIndexChanged.connect(self._changed)
+        for cb in [self.cb_mlg, *self.toggles.values()]:
+            cb.toggled.connect(self._changed)
+        if path:
+            self.show_file(path)
+        else:
+            self.render()
+
+    def _load(self, v: dict) -> None:
+        self._loading = True
+        for combo, key in ((self.cb_grade, "grade"), (self.cb_tr, "transition"), (self.cb_kc, "killcam"),
+                           (self.cb_int, "mlg_intensity"), (self.cb_strobe, "mlg_strobe")):
+            combo.setCurrentIndex(max(0, combo.findData(v.get(key))))
+        self.cb_mlg.setChecked(bool(v.get("mlg")))
+        for k, cb in self.toggles.items():
+            cb.setChecked(bool(v.get(k, True)))
+        self._loading = False
+
+    def values(self) -> dict:
+        v = dict(self.v)
+        v.update(grade=self.cb_grade.currentData(), transition=self.cb_tr.currentData(),
+                 killcam=self.cb_kc.currentData(), mlg=self.cb_mlg.isChecked(),
+                 mlg_intensity=self.cb_int.currentData(), mlg_strobe=self.cb_strobe.currentData())
+        for k, cb in self.toggles.items():
+            v[k] = cb.isChecked()
+        return v
+
+    def _template(self) -> None:
+        from .reel import template_values
+        key = self.cb_tpl.currentData()
+        if not key:
+            return
+        t = template_values(key)
+        cur = self.values()
+        for k in EFFECT_DEFAULTS:
+            if k in t:
+                cur[k] = t[k]
+        self.v = cur
+        self.ed.template_applied = key
+        self._load(cur)
+        self._changed()
+
+    def _changed(self, *_):
+        if self._loading:
+            return
+        self._dirty = True
+        self.lbl.setText("Settings changed — " + ("re-rendering…" if self.cb_autorender.isChecked()
+                                                  else "press Re-render"))
+        if self.cb_autorender.isChecked():
+            self._timer.start()
+
+    def render(self) -> None:
+        if self._worker is not None:
+            self._timer.start()          # one is running: try again when it's done
+            return
+        try:
+            seg = self.ed.preview_segment()
+            o = self.ed.preview_options(self.values())
+        except Exception as exc:
+            self.lbl.setText(f"Preview failed: {exc}")
+            return
+        d = os.path.join(tempfile.gettempdir(), "bf6kt_preview")
+        os.makedirs(d, exist_ok=True)
+        out = os.path.join(d, f"look_{int(time.time() * 1000) % 10_000_000}.mp4")
+        w = ReelWorker([seg], out, o)
+        self._worker = w
+        self._dirty = False
+        self.b_render.setEnabled(False)
+        self.lbl.setText("Rendering…")
+
+        def wire(worker):
+            worker.progress.connect(lambda f, m: self.lbl.setText(f"Rendering… {int(f * 100)}%"))
+            worker.done.connect(self._done)
+            worker.failed.connect(self._failed)
+
+        mw = self.ed.parent()
+        mw._run_in_thread(w, wire)
+
+    def _done(self, path: str) -> None:
+        self._worker = None
+        self.b_render.setEnabled(True)
+        self.show_file(path)
+
+    def _failed(self, msg: str) -> None:
+        self._worker = None
+        self.b_render.setEnabled(True)
+        self.lbl.setText("Preview failed: " + msg[-300:])
+
+    def show_file(self, path: str) -> None:
+        from .video import probe
+        self.path = path
+        try:
+            dur = probe(path).duration
+        except Exception:
+            dur = 8.0
+        self.player.load(path, 0.0, dur, autoplay=not os.environ.get("BF6KT_NO_OPEN"))
+        self.lbl.setText("Playing with sound." + (" (Settings changed since — re-render to see them.)"
+                                                   if self._dirty else ""))
+
+    def done(self, r: int) -> None:  # noqa: D401 - stop sound/picture when closing
+        self._timer.stop()
+        self.player.shutdown()
+        super().done(r)
+
+
+class ShortsWorker(Worker):
+    progress = Signal(float, str)
+    done = Signal(list)
+    failed = Signal(str)
+
+    def __init__(self, picks, out_dir: str, options: ReelOptions):
+        super().__init__()
+        self.picks, self.out_dir, self.options = picks, out_dir, options
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        from .shorts import export_shorts
+        try:
+            files = export_shorts(self.picks, self.out_dir, self.options,
+                                  progress=lambda f, m: self.progress.emit(f, m), should_cancel=lambda: self._cancel)
+            self.done.emit(files)
+        except ReelCancelled:
+            self.failed.emit("Cancelled")
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ShortsDialog(QDialog):
+    """Pick how many Shorts, their length and look; shows which moments will be used."""
+
+    def __init__(self, parent: "MainWindow"):
+        super().__init__(parent)
+        from .reel import TEMPLATES
+        self.mw = parent
+        st = parent.settings
+        self.setWindowTitle("Export Shorts")
+        self.resize(760, 460)
+        lay = QHBoxLayout(self)
+        form = QFormLayout()
+        lay.addLayout(form)
+        self.sp_n = QSpinBox()
+        self.sp_n.setRange(1, 30)
+        self.sp_n.setValue(int(st.value("shorts_n", 5)))
+        self.sp_min = QSpinBox()
+        self.sp_min.setRange(5, 60)
+        self.sp_min.setSuffix(" s")
+        self.sp_min.setValue(int(st.value("shorts_min", 15)))
+        self.sp_max = QSpinBox()
+        self.sp_max.setRange(6, 180)
+        self.sp_max.setSuffix(" s")
+        self.sp_max.setValue(int(st.value("shorts_max", 30)))
+        self.cb_tpl = QComboBox()
+        for n in TEMPLATES:
+            self.cb_tpl.addItem(n, n)
+        self.cb_tpl.setCurrentText(str(st.value("shorts_template", "TikTok hype")))
+        self.ed_dir = QLineEdit(str(st.value("shorts_dir", os.path.join(os.path.expanduser("~"), "Videos",
+                                                                         "BF6 Shorts"))))
+        b_dir = QPushButton("…")
+        b_dir.clicked.connect(self._pick_dir)
+        drow = QHBoxLayout()
+        drow.addWidget(self.ed_dir, 1)
+        drow.addWidget(b_dir)
+        form.addRow("How many", self.sp_n)
+        form.addRow("Shortest", self.sp_min)
+        form.addRow("Longest", self.sp_max)
+        form.addRow("Look", self.cb_tpl)
+        form.addRow("Save to", drow)
+        note = QLabel("Each Short is vertical 1080×1920 with a hook title at the top, kill call-outs and captions.")
+        note.setWordWrap(True)
+        form.addRow(note)
+        right = QVBoxLayout()
+        lay.addLayout(right, 1)
+        self.list = QListWidget()
+        right.addWidget(QLabel("<b>Moments</b> (best first)"))
+        right.addWidget(self.list, 1)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Export")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        btns.addWidget(cancel)
+        btns.addWidget(ok)
+        right.addLayout(btns)
+        for w_ in (self.sp_n, self.sp_min, self.sp_max):
+            w_.valueChanged.connect(self._refresh)
+        self._refresh()
+
+    def _pick_dir(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Save Shorts to", self.ed_dir.text())
+        if d:
+            self.ed_dir.setText(d)
+
+    def picks(self):
+        from .shorts import plan_shorts
+        cands = [s for _, _, s in self.mw._candidates()]
+        return plan_shorts(cands, {v.path: v.duration for v in self.mw.videos}, self.sp_n.value(),
+                           float(self.sp_min.value()), float(max(self.sp_max.value(), self.sp_min.value())))
+
+    def _refresh(self, *_):
+        self.list.clear()
+        for i, (s, seg) in enumerate(self.picks()):
+            self.list.addItem(f"{i + 1}.  {s.stars}  “{seg.title}”  {os.path.basename(s.video)} "
+                              f"{fmt_time(seg.start)}–{fmt_time(seg.end)} ({seg.end - seg.start:.0f} s)")
+        if not self.list.count():
+            self.list.addItem("Scan a video first.")
+
+    def save(self) -> None:
+        st = self.mw.settings
+        for k, v in (("shorts_n", self.sp_n.value()), ("shorts_min", self.sp_min.value()),
+                     ("shorts_max", self.sp_max.value()), ("shorts_template", self.cb_tpl.currentText()),
+                     ("shorts_dir", self.ed_dir.text())):
+            st.setValue(k, v)
 
 
 class EffectsDialog(QDialog):
@@ -1116,6 +1449,7 @@ class EffectsDialog(QDialog):
         form.addRow("Preview", prow)
         self.last_preview = ""
         self._pv_worker = None
+        self._pv_values: Optional[dict] = None
         btns = QHBoxLayout()
         btns.addStretch(1)
         ok = QPushButton("OK")
@@ -1199,6 +1533,7 @@ class EffectsDialog(QDialog):
     def preview(self, values: Optional[dict] = None) -> None:
         if self._pv_worker is not None:
             return
+        self._pv_values = values
         try:
             seg = self.preview_segment()
             o = self.preview_options(values)
@@ -1224,9 +1559,12 @@ class EffectsDialog(QDialog):
         self._pv_worker = None
         self.b_preview.setEnabled(True)
         self.last_preview = path
-        self.lbl_pv.setText("Playing in your video player")
+        self.lbl_pv.setText("")
         if not os.environ.get("BF6KT_NO_OPEN"):
-            open_with_system(path)
+            dlg = LookPreviewDialog(self, self._pv_values or self.values(), path)
+            if dlg.exec():
+                self.v = {**self.values(), **dlg.values()}
+                self._load(self.v)
 
     def _preview_failed(self, msg: str) -> None:
         self._pv_worker = None
@@ -1760,6 +2098,10 @@ class MainWindow(QMainWindow):
         self.btn_montage.setToolTip("Tick only the best clips to fill a length, ordered to build up to the best one")
         self.btn_montage.clicked.connect(self.make_montage_dialog)
         sel_row.addWidget(self.btn_montage)
+        self.btn_shorts = QPushButton("Export Shorts…")
+        self.btn_shorts.setToolTip("One vertical 15-30 s video per top moment, with a hook title (TikTok / Shorts)")
+        self.btn_shorts.clicked.connect(self.export_shorts_dialog)
+        sel_row.addWidget(self.btn_shorts)
         sel_row.addStretch(1)
         sel_row.addWidget(self.btn_preview)
 
@@ -2373,6 +2715,50 @@ class MainWindow(QMainWindow):
             out = getattr(self, "_last_reel_target", None)
             if out and extra:
                 self._pending_versions = [(n, dlg.spec(float(n)), dlg.cb_finale.isChecked()) for n in extra]
+
+    def export_shorts_dialog(self) -> None:
+        if not any(v.result for v in self.videos):
+            QMessageBox.information(self, APP_NAME, "Scan a video first.")
+            return
+        dlg = ShortsDialog(self)
+        if not dlg.exec():
+            return
+        dlg.save()
+        picks = dlg.picks()
+        if not picks:
+            return
+        self.start_shorts(picks, dlg.ed_dir.text(), dlg.cb_tpl.currentText())
+
+    def start_shorts(self, picks, out_dir: str, template: str) -> None:
+        from .shorts import short_options
+        base = self.reel_options()
+        o = short_options(template, base)
+        for k, v in self.effects.items():                  # your MLG/sound picks, but the template's look
+            if k.startswith("mlg_") and hasattr(o, k) and k not in ("mlg_intensity", "mlg_strobe"):
+                setattr(o, k, v)
+        w = ShortsWorker(picks, out_dir, o)
+        self._reel_worker = w
+
+        def wire(worker):
+            worker.progress.connect(self._on_reel_progress)
+            worker.done.connect(self._on_shorts_done)
+            worker.failed.connect(self._on_reel_failed)
+
+        self._run_in_thread(w, wire)
+        self.bar.setVisible(True)
+        self.bar.setValue(0)
+        self.status.setText(f"Exporting {len(picks)} Short(s)…")
+        self._refresh_buttons()
+
+    @Slot(list)
+    def _on_shorts_done(self, files: list) -> None:
+        self._reel_worker = None
+        self.bar.setVisible(False)
+        self._refresh_buttons()
+        self.last_shorts = files
+        self.status.setText(f"Wrote {len(files)} Short(s) to {os.path.dirname(files[0]) if files else ''}")
+        if files and not os.environ.get("BF6KT_NO_OPEN"):
+            open_with_system(os.path.dirname(files[0]))
 
     def _candidates(self):
         from .hype import Scored

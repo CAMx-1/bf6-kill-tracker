@@ -278,3 +278,61 @@ def test_mlg_suggest_button(app, video, tmp_path, monkeypatch):
     assert m.lbl_why.isVisible() or m.lbl_why.text()
     w.preview.shutdown()
     w.close()
+
+
+def test_look_preview_dialog(app, video, tmp_path, monkeypatch):
+    import time as _t
+    from PySide6.QtCore import QSettings
+    from bf6killtracker import mlg
+    from bf6killtracker.gui import EffectsDialog, LookPreviewDialog
+    monkeypatch.setattr(mlg, "my_sounds_dir", lambda: str(tmp_path / "mysounds"))
+    w = MainWindow(QSettings(str(tmp_path / "lp.ini"), QSettings.IniFormat))
+    d = EffectsDialog(w, w.effects, {})
+    lp = LookPreviewDialog(d, {**d.values(), "mlg": True})
+    t0 = _t.time()
+    while not lp.path and _t.time() - t0 < 90:
+        app.processEvents()
+        _t.sleep(0.05)
+    assert lp.path and os.path.getsize(lp.path) > 10000, lp.lbl.text()
+    assert lp.player.duration > 5 and lp.player._wav and os.path.getsize(lp.player._wav) > 10000
+    assert lp.player._prepare_audio(2.0) and os.path.getsize(lp.player.audio_file) < os.path.getsize(lp.player._wav)
+    first = lp.path
+    lp.cb_tpl.setCurrentIndex(lp.cb_tpl.findData("Noir"))         # changing the look re-renders
+    assert lp.values()["grade"] == "Black & white" and not lp.values()["mlg"]
+    t0 = _t.time()
+    while (lp.path == first or lp._worker is not None) and _t.time() - t0 < 90:
+        app.processEvents()
+        _t.sleep(0.05)
+    assert lp.path != first
+    lp.done(1)
+    w.preview.shutdown()
+    w.close()
+
+
+def test_shorts_dialog_and_export(app, video, tmp_path, monkeypatch):
+    import time as _t
+    from PySide6.QtCore import QSettings
+    from bf6killtracker.gui import ShortsDialog
+    w = MainWindow(QSettings(str(tmp_path / "sh.ini"), QSettings.IniFormat))
+    w.add_paths([video])
+    kills = [KillEvent(3, types=["headshot"]), KillEvent(4), KillEvent(5), KillEvent(15, count=2)]
+    w.videos[0].result = AnalysisResult(video, 20.0, 30.0, kills, [], 0, 0.0, 10.0, feed_used=True)
+    w.videos[0].status = "Done"
+    d = ShortsDialog(w)
+    d.sp_n.setValue(2)
+    d.sp_min.setValue(6)
+    d.sp_max.setValue(8)
+    picks = d.picks()
+    assert len(picks) == 2 and all(6 - 1e-6 <= g.end - g.start <= 8 + 1e-6 for _, g in picks)
+    assert d.list.count() == 2
+    out = str(tmp_path / "shorts")
+    w.start_shorts(picks, out, "Clean")
+    t0 = _t.time()
+    while w._reel_worker is not None and _t.time() - t0 < 120:
+        app.processEvents()
+        _t.sleep(0.05)
+    assert len(w.last_shorts) == 2 and all(os.path.getsize(f) > 10000 for f in w.last_shorts)
+    from bf6killtracker.video import probe
+    assert (probe(w.last_shorts[0]).width, probe(w.last_shorts[0]).height) == (1080, 1920)
+    w.preview.shutdown()
+    w.close()
