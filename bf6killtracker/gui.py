@@ -484,7 +484,8 @@ EFFECT_DEFAULTS = dict(template="", transition="fade", transition_s=0.35, killca
                        intro_text="", intro_sub="", outro_text="", outro_sub="", card_s=2.5,
                        watermark_text="", watermark_image="", watermark_pos="Top right", watermark_opacity=0.7,
                        audio_track=0, denoise=False, loudnorm=False, thumbnail=False, replay_finale_only=False,
-                       grade="None", letterbox=False, vignette=False, grain=False, **mlg_defaults())
+                       grade="None", letterbox=False, vignette=False, grain=False,
+                       brightness=0.0, contrast=1.0, saturation=1.0, gamma=1.0, lut="", **mlg_defaults())
 
 
 class MontageDialog(QDialog):
@@ -1002,6 +1003,81 @@ class MlgDialog(QDialog):
         p.preview({**p.values(), **self.values(), "mlg": True})
 
 
+class ColorCorrectionBox(QWidget):
+    """Brightness / contrast / saturation / gamma sliders and a LUT picker (.cube / .3dl)."""
+    changed = Signal()
+    # key: (min, max, default, scale) in slider units; value = slider / scale
+    SPEC = {"brightness": (-50, 50, 0, 100.0), "contrast": (0, 200, 100, 100.0),
+            "saturation": (0, 300, 100, 100.0), "gamma": (10, 300, 100, 100.0)}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QFormLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        self.sliders: Dict[str, QSlider] = {}
+        self.labels: Dict[str, QLabel] = {}
+        for key, (lo, hi, dflt, scale) in self.SPEC.items():
+            sl = QSlider(Qt.Horizontal)
+            sl.setRange(lo, hi)
+            sl.setValue(dflt)
+            sl.setToolTip("Double-click to reset")
+            lb = QLabel()
+            lb.setMinimumWidth(40)
+            sl.valueChanged.connect(lambda _v, k=key: self._moved(k))
+            sl.mouseDoubleClickEvent = lambda _e, k=key: self.sliders[k].setValue(self.SPEC[k][2])
+            row = QHBoxLayout()
+            row.addWidget(sl, 1)
+            row.addWidget(lb)
+            lay.addRow(key.capitalize(), row)
+            self.sliders[key], self.labels[key] = sl, lb
+            self._moved(key, emit=False)
+        self.ed_lut = QLineEdit()
+        self.ed_lut.setPlaceholderText("LUT file (.cube / .3dl), optional")
+        b_lut = QPushButton("Browse…")
+        b_lut.clicked.connect(self._pick)
+        b_reset = QPushButton("Reset")
+        b_reset.clicked.connect(self.reset)
+        self.ed_lut.editingFinished.connect(self.changed.emit)
+        lrow = QHBoxLayout()
+        lrow.addWidget(self.ed_lut, 1)
+        lrow.addWidget(b_lut)
+        lrow.addWidget(b_reset)
+        lay.addRow("LUT", lrow)
+
+    def _moved(self, key: str, emit: bool = True) -> None:
+        self.labels[key].setText(f"{self.sliders[key].value() / self.SPEC[key][3]:.2f}")
+        if emit:
+            self.changed.emit()
+
+    def _pick(self) -> None:
+        f, _ = QFileDialog.getOpenFileName(self, "Choose a LUT", self.ed_lut.text(), "LUT files (*.cube *.3dl)")
+        if f:
+            self.ed_lut.setText(f)
+            self.changed.emit()
+
+    def reset(self) -> None:
+        for k, sl in self.sliders.items():
+            sl.blockSignals(True)
+            sl.setValue(self.SPEC[k][2])
+            sl.blockSignals(False)
+            self._moved(k, emit=False)
+        self.ed_lut.clear()
+        self.changed.emit()
+
+    def load(self, v: dict) -> None:
+        for k, sl in self.sliders.items():
+            sl.blockSignals(True)
+            sl.setValue(int(round(float(v.get(k, EFFECT_DEFAULTS[k])) * self.SPEC[k][3])))
+            sl.blockSignals(False)
+            self._moved(k, emit=False)
+        self.ed_lut.setText(str(v.get("lut", "") or ""))
+
+    def values(self) -> dict:
+        d = {k: sl.value() / self.SPEC[k][3] for k, sl in self.sliders.items()}
+        d["lut"] = self.ed_lut.text().strip()
+        return d
+
+
 class LookPreviewDialog(QDialog):
     """Plays a rendered look preview with sound; change the look on the right and re-render."""
 
@@ -1051,6 +1127,8 @@ class LookPreviewDialog(QDialog):
         for g in GRADES:
             self.cb_grade.addItem(g, g)
         form.addRow("Colour", self.cb_grade)
+        self.cc = ColorCorrectionBox()
+        form.addRow("Correction", self.cc)
         self.cb_tr = QComboBox()
         for label, k in EffectsDialog.TRANSITIONS:
             self.cb_tr.addItem(label, k)
@@ -1107,6 +1185,7 @@ class LookPreviewDialog(QDialog):
             w_.currentIndexChanged.connect(self._changed)
         for cb in [self.cb_mlg, *self.toggles.values()]:
             cb.toggled.connect(self._changed)
+        self.cc.changed.connect(self._changed)
         if path:
             self.show_file(path)
         else:
@@ -1117,6 +1196,7 @@ class LookPreviewDialog(QDialog):
         for combo, key in ((self.cb_grade, "grade"), (self.cb_tr, "transition"), (self.cb_kc, "killcam"),
                            (self.cb_int, "mlg_intensity"), (self.cb_strobe, "mlg_strobe")):
             combo.setCurrentIndex(max(0, combo.findData(v.get(key))))
+        self.cc.load(v)
         self.cb_mlg.setChecked(bool(v.get("mlg")))
         for k, cb in self.toggles.items():
             cb.setChecked(bool(v.get(k, True)))
@@ -1127,6 +1207,7 @@ class LookPreviewDialog(QDialog):
         v.update(grade=self.cb_grade.currentData(), transition=self.cb_tr.currentData(),
                  killcam=self.cb_kc.currentData(), mlg=self.cb_mlg.isChecked(),
                  mlg_intensity=self.cb_int.currentData(), mlg_strobe=self.cb_strobe.currentData())
+        v.update(self.cc.values())
         for k, cb in self.toggles.items():
             v[k] = cb.isChecked()
         return v
@@ -1570,6 +1651,8 @@ class EffectsDialog(QDialog):
         for w_ in (self.cb_lb, self.cb_vig, self.cb_grain):
             lrow.addWidget(w_)
         form.addRow("Look", lrow)
+        self.cc = ColorCorrectionBox()
+        form.addRow("Colour correction", self.cc)
         mrow = QHBoxLayout()
         self.cb_mlg = QCheckBox("MLG mode — the 2014 montage parody look")
         self.cb_mlg.setToolTip("Hitmarkers, air horns, flying soda cans, meme text, colour strobe and "
@@ -1629,6 +1712,7 @@ class EffectsDialog(QDialog):
         self.cb_lb.setChecked(bool(v["letterbox"]))
         self.cb_vig.setChecked(bool(v["vignette"]))
         self.cb_grain.setChecked(bool(v["grain"]))
+        self.cc.load(v)
 
     def values(self) -> dict:
         v = dict(self.v)
@@ -1640,6 +1724,7 @@ class EffectsDialog(QDialog):
                  loudnorm=self.cb_ln.isChecked(), thumbnail=self.cb_thumb.isChecked(),
                  mlg=self.cb_mlg.isChecked(), grade=self.cb_grade.currentData(), letterbox=self.cb_lb.isChecked(),
                  vignette=self.cb_vig.isChecked(), grain=self.cb_grain.isChecked())
+        v.update(self.cc.values())
         for k, e in self.ed.items():
             v[k] = e.text()
         return v
@@ -2388,6 +2473,7 @@ class MainWindow(QMainWindow):
             self.effects = {**EFFECT_DEFAULTS, **_json.loads(self.settings.value("effects", "") or "{}")}
         except ValueError:
             self.effects = dict(EFFECT_DEFAULTS)
+        self._sync_preview_look()
         callout_row.addStretch(1)
         self.cb_titles = QCheckBox("Video name at the start of each clip")
         self.cb_titles.setChecked(self.settings.value("titles", "false") == "true")
@@ -3201,7 +3287,7 @@ class MainWindow(QMainWindow):
         text = f"{c.kills} KILL STREAK" if c.kind == "streak" else c.title
         why = self._hype(v, c)[1]
         special = next((w for w in why if w in ("last squad member alive", "squad wipe", "tank buster")), "")
-        make_thumbnail(v.path, t, out, text, special, self.callout_style)
+        make_thumbnail(v.path, t, out, text, special, self.callout_style, options=self.reel_options())
         self.status.setText(self.status.text() + f" · thumbnail {os.path.basename(out)}")
         return out
 
@@ -3212,6 +3298,16 @@ class MainWindow(QMainWindow):
         except ValueError:
             return {}
 
+    def _sync_preview_look(self) -> None:
+        """Show the chosen colour grade + correction in the in-app clip preview (detection is unaffected)."""
+        from .reel import GRADES, correction_filters
+        o = ReelOptions()
+        for k in ("brightness", "contrast", "saturation", "gamma", "lut"):
+            setattr(o, k, self.effects.get(k, getattr(o, k)))
+        look = ",".join(x for x in (GRADES.get(self.effects.get("grade", "None"), ""), correction_filters(o)) if x)
+        if hasattr(self, "preview"):
+            self.preview.set_look(look)
+
     def edit_effects(self) -> None:
         import json as _json
         dlg = EffectsDialog(self, self.effects, self._user_templates())
@@ -3219,6 +3315,7 @@ class MainWindow(QMainWindow):
             return
         self.effects = dlg.values()
         self.settings.setValue("effects", _json.dumps(self.effects))
+        self._sync_preview_look()
         key = dlg.template_applied or ""
         ut = dict(dlg.user_templates)
         if key.startswith("save:"):           # remember the main-window extras with the template
@@ -3257,6 +3354,7 @@ class MainWindow(QMainWindow):
         self.effects["template"] = key
         import json as _json
         self.settings.setValue("effects", _json.dumps(self.effects))
+        self._sync_preview_look()
         self.status.setText(f"Applied the “{key.replace('user:', '')}” look.")
 
     def edit_callout_style(self) -> None:
@@ -3662,6 +3760,7 @@ class MainWindow(QMainWindow):
             try:
                 self.effects = {**EFFECT_DEFAULTS, **_json.loads(st["effects"])}
                 self.settings.setValue("effects", st["effects"])
+                self._sync_preview_look()
             except ValueError:
                 pass
         self.videos = []

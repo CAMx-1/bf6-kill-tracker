@@ -221,7 +221,8 @@ def cmd_analyze(a: argparse.Namespace) -> int:
                     b = best[0]
                     t = max(b.kill_times, key=lambda k: (k[1], k[0]))[0] if b.kill_times else b.start
                     make_thumbnail(b.video, t + 0.5, a.thumbnail, f"{b.kills} KILL STREAK" if b.kills > 2
-                                   else ("DOUBLE KILL" if b.kills == 2 else "KILL"), "", o.callout)
+                                   else ("DOUBLE KILL" if b.kills == 2 else "KILL"), "", o.callout,
+                                   options=o)
                     print(f"wrote {a.thumbnail}")
             if not a.quiet:
                 print(file=sys.stderr)
@@ -465,6 +466,11 @@ def add_look_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--letterbox", action="store_true", help="cinematic black bars")
     p.add_argument("--vignette", action="store_true")
     p.add_argument("--grain", action="store_true", help="film grain")
+    p.add_argument("--brightness", type=float, metavar="-1..1", help="colour correction brightness (0 = unchanged)")
+    p.add_argument("--contrast", type=float, metavar="0-3", help="colour correction contrast (1 = unchanged)")
+    p.add_argument("--saturation", type=float, metavar="0-3", help="colour correction saturation (1 = unchanged)")
+    p.add_argument("--gamma", type=float, metavar="0.1-3", help="colour correction gamma (1 = unchanged)")
+    p.add_argument("--lut", metavar="FILE", help="apply a .cube / .3dl LUT file")
     p.add_argument("--mlg", action="store_true",
                    help="MLG montage mode: hitmarkers, air horns, cans, meme text, strobe, OH BABY A TRIPLE")
     p.add_argument("--mlg-intensity", choices=INTENSITIES)
@@ -490,7 +496,9 @@ def add_look_args(p: argparse.ArgumentParser) -> None:
 
 def apply_look_args(a: argparse.Namespace, o) -> None:
     from .mlg import TOGGLES
-    for k in ("grade", "mlg_intensity", "mlg_strobe", "mlg_deepfry", "mlg_words", "mlg_triple_text",
+    if getattr(a, "lut", None) and not os.path.isfile(a.lut):
+        raise SystemExit(f"--lut: file not found: {a.lut}")
+    for k in ("grade", "brightness", "contrast", "saturation", "gamma", "lut", "mlg_intensity", "mlg_strobe", "mlg_deepfry", "mlg_words", "mlg_triple_text",
               "mlg_sfx_volume", "mlg_airhorn_chance", "mlg_seed", "mlg_triple_sound", "mlg_airhorn_sound",
               "mlg_music"):
         if getattr(a, k, None) is not None:

@@ -102,6 +102,11 @@ class ReelOptions:
     letterbox: bool = False                     # cinematic black bars
     vignette: bool = False
     grain: bool = False                         # film grain
+    brightness: float = 0.0                     # colour correction (applied after the grade): -1..1, 0 = unchanged
+    contrast: float = 1.0                       # 0..3, 1 = unchanged
+    saturation: float = 1.0                     # 0..3, 1 = unchanged
+    gamma: float = 1.0                          # 0.1..3, 1 = unchanged
+    lut: str = ""                               # path to a .cube / .3dl LUT ("" = none)
     # MLG mode (see mlg.py): hitmarkers, air horns, soda cans, meme text, strobe, "OH BABY A TRIPLE"
     mlg: bool = False
     mlg_intensity: str = "normal"               # mild | normal | max (how much stuff on screen)
@@ -177,10 +182,17 @@ GRADES: Dict[str, str] = {
     "Neon": "eq=saturation=1.9:contrast=1.15,hue=h=15",
     "Night vision": "hue=s=0,lutrgb=r=val*0.25:g=min(255\\,val*1.3):b=val*0.25,noise=alls=10:allf=t",
     "Deep fried": "eq=saturation=3:contrast=1.6,unsharp=7:7:3,noise=alls=14:allf=t",
+    "Punchy": "eq=contrast=1.15:saturation=1.25:gamma=0.97,unsharp=5:5:0.6",
+    "Bright & clean": "eq=brightness=0.04:contrast=1.05:saturation=1.1:gamma=1.08",
+    "Moody": "eq=contrast=1.2:saturation=0.8:gamma=0.9:brightness=-0.03,colorbalance=rs=-.04:bs=.05",
+    "Desaturated": "eq=saturation=0.45:contrast=1.1",
+    "Bleach bypass": "eq=saturation=0.6:contrast=1.35:gamma=0.95",
+    "Sunset": "colorbalance=rs=.1:gs=.02:bs=-.1:rm=.08:bm=-.08:rh=.06:bh=-.06,eq=saturation=1.2:contrast=1.05",
+    "Matrix": "hue=s=0,lutrgb=r=val*0.2:g=min(255\\,val*1.2):b=val*0.3,eq=contrast=1.2",
 }
 
 # keys a template always sets (back to defaults if it doesn't mention them), so looks don't mix
-LOOK_KEYS = ("grade", "letterbox", "vignette", "grain", "transition", "killcam", "captions", "replay_speed")
+LOOK_KEYS = ("grade", "letterbox", "vignette", "grain", "brightness", "contrast", "saturation", "gamma", "lut", "transition", "killcam", "captions", "replay_speed")
 
 _MLG = dict(mlg=True, transition="cut", killcam="both", overlays=True, captions=False, replay=True,
             replay_speed=0.5, beat_sync=True, loudnorm=True,
@@ -570,11 +582,30 @@ def _overlay_specs(p: _Part, o: ReelOptions, W: int, H: int, tmp: str, n: int):
     return specs
 
 
+def correction_filters(o: ReelOptions) -> str:
+    """ffmpeg filters for the manual colour correction (eq + optional LUT), no leading comma.
+    Empty when everything is neutral."""
+    parts = []
+    b, c, s, g = (float(o.brightness), float(o.contrast), float(o.saturation), float(o.gamma))
+    if abs(b) > 1e-3 or abs(c - 1) > 1e-3 or abs(s - 1) > 1e-3 or abs(g - 1) > 1e-3:
+        b = max(-1.0, min(1.0, b))
+        c = max(0.0, min(3.0, c))
+        s = max(0.0, min(3.0, s))
+        g = max(0.1, min(3.0, g))
+        parts.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s:.3f}:gamma={g:.3f}")
+    lut = (o.lut or "").strip()
+    if lut and os.path.isfile(lut):
+        q = lut.replace("\\", "/").replace("'", "'\\''")
+        parts.append(f"lut3d=file='{q}'")
+    return ",".join(parts)
+
+
 def _look_filters(o: ReelOptions, W: int, H: int) -> str:
     vf = ""
     g = GRADES.get(o.grade, "")
-    if g:
-        vf += "," + g + ",format=yuv420p"
+    cc = correction_filters(o)
+    if g or cc:
+        vf += "," + ",".join(x for x in (g, cc) if x) + ",format=yuv420p"
     if o.grain:
         vf += ",noise=alls=9:allf=t+u"
     if o.vignette:
@@ -799,8 +830,26 @@ def _watermark(o: ReelOptions, W: int, H: int, tmp: str):
 _XFADE = {"crossfade": "fade", "whip": "slideleft", "zoom": "zoomin"}
 
 
+def grade_frame(fr, o: ReelOptions, ffmpeg: Optional[str] = None):
+    """Run a BGR frame through the options' colour grade + correction (the same filters the reel uses)."""
+    import numpy as np
+    parts = [x for x in (GRADES.get(o.grade, ""), correction_filters(o)) if x]
+    if not parts:
+        return fr
+    h, w = fr.shape[:2]
+    cmd = [ffmpeg or find_ffmpeg(), "-v", "error", "-nostdin", "-f", "rawvideo", "-pix_fmt", "bgr24",
+           "-s", f"{w}x{h}", "-i", "-", "-vf", ",".join(parts), "-frames:v", "1",
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    r = subprocess.run(cmd, input=np.ascontiguousarray(fr).tobytes(), stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, **NO_WINDOW)
+    if r.returncode != 0 or len(r.stdout) != h * w * 3:
+        return fr                                  # never fail a thumbnail over a grade
+    return np.frombuffer(r.stdout, np.uint8).reshape(h, w, 3)
+
+
 def make_thumbnail(video: str, t: float, out_path: str, text: str = "", sub: str = "",
-                   style: Optional["CalloutStyle"] = None, size: Tuple[int, int] = (1280, 720)) -> str:
+                   style: Optional["CalloutStyle"] = None, size: Tuple[int, int] = (1280, 720),
+                   options: Optional[ReelOptions] = None) -> str:
     """YouTube-style thumbnail: the frame just after a kill, punchier colours, big text."""
     import cv2
     from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
@@ -808,6 +857,8 @@ def make_thumbnail(video: str, t: float, out_path: str, text: str = "", sub: str
     from .video import grab_frame
     st = style or CalloutStyle()
     fr = grab_frame(video, max(0.0, t))
+    if options is not None:
+        fr = grade_frame(fr, options)
     img = Image.fromarray(cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)).resize(size, Image.LANCZOS)
     img = ImageEnhance.Contrast(img).enhance(1.25)
     img = ImageEnhance.Color(img).enhance(1.35)

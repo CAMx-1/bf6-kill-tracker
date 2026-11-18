@@ -31,9 +31,10 @@ class _Decoder(QThread):
     ended = Signal(int)
 
     def __init__(self, gen: int, path: str, start: float, duration: float, offset: float,
-                 hold_first: bool = False, parent=None, size=(PREVIEW_W, PREVIEW_H)):
+                 hold_first: bool = False, parent=None, size=(PREVIEW_W, PREVIEW_H), look: str = ""):
         super().__init__(parent)
         self.size_ = size
+        self.look = look               # extra ffmpeg filters (colour grade), applied before padding
         # (not "self.start": that would shadow QThread.start)
         self.gen, self.path, self.clip_start, self.duration, self.offset = gen, path, start, duration, offset
         self.hold_first = hold_first   # show one frame, then wait paused
@@ -58,6 +59,7 @@ class _Decoder(QThread):
                "-ss", f"{self.clip_start + self.offset:.3f}", "-t", f"{remaining:.3f}", "-i", self.path,
                "-an", "-sn",
                "-vf", f"fps={fps},scale={w}:{h}:force_original_aspect_ratio=decrease:flags=fast_bilinear,"
+                      f"{self.look + ',' if self.look else ''}"
                       f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
         size = w * h * 3
@@ -139,6 +141,7 @@ class PreviewPlayer(QWidget):
         self._gen = 0
         self._dec: Optional[_Decoder] = None
         self._old: list = []
+        self.look = ""                  # colour grade filters shown in the picture (not the audio)
         self._set_enabled(False)
 
     # -- public API ----------------------------------------------------------
@@ -148,6 +151,14 @@ class PreviewPlayer(QWidget):
         self.pos = 0.0
         self._set_enabled(True)
         self.seek(0.0, play=autoplay)
+
+    def set_look(self, look: str) -> None:
+        """Show the video with these ffmpeg colour filters; restarts the picture if it changed."""
+        if look == self.look:
+            return
+        self.look = look
+        if self.path:
+            self.seek(self.pos, play=self.playing)
 
     def clear(self, message: str = "Select a streak or kill to preview it here") -> None:
         self._stop_decoder()
@@ -207,7 +218,7 @@ class PreviewPlayer(QWidget):
     def _start_decoder(self, offset: float, hold_first: bool = False) -> None:
         self._stop_decoder()
         self._gen += 1
-        d = _Decoder(self._gen, self.path, self.start, self.duration, offset, hold_first, self, self.size_)
+        d = _Decoder(self._gen, self.path, self.start, self.duration, offset, hold_first, self, self.size_, self.look)
         d.frame.connect(self._on_frame)
         d.ended.connect(self._on_ended)
         self._dec = d
